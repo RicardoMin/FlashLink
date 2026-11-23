@@ -12,7 +12,18 @@ mod gui;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod lan;
 #[cfg(any(windows, test))]
+#[cfg_attr(not(windows), allow(dead_code))]
+mod lease;
+#[cfg(any(windows, test))]
 mod management;
+#[cfg(windows)]
+mod privacy;
+#[cfg(windows)]
+mod privacy_display;
+#[cfg(windows)]
+mod privacy_driver;
+#[cfg(any(windows, test))]
+mod privacy_time;
 #[cfg(windows)]
 mod service;
 use std::ffi::OsString;
@@ -148,6 +159,45 @@ fn check_recovery_files(engine_dir: &Path, program_data: Option<&Path>) -> Resul
 }
 
 fn main() -> ExitCode {
+    #[cfg(windows)]
+    {
+        let mut args = env::args_os().skip(1);
+        let op = args.next();
+        if op.as_deref() == Some(std::ffi::OsStr::new("--install-privacy-display")) {
+            return match privacy_driver::install() {
+                Ok(msg) => {
+                    gui::notice(&msg);
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    gui::notice(&format!("安装虚拟屏失败：{e}"));
+                    ExitCode::FAILURE
+                }
+            };
+        }
+        if op.as_deref() == Some(std::ffi::OsStr::new("--privacy-guard"))
+            || op.as_deref() == Some(std::ffi::OsStr::new("--privacy-recover"))
+        {
+            let Some(dir) = args.next() else {
+                return ExitCode::FAILURE;
+            };
+            let pid = if op.as_deref() == Some(std::ffi::OsStr::new("--privacy-guard")) {
+                match args.next().and_then(|p| p.to_str()?.parse().ok()) {
+                    Some(pid) => Some(pid),
+                    None => return ExitCode::FAILURE,
+                }
+            } else {
+                None
+            };
+            return match privacy::run(Path::new(&dir), pid) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    let _ = writeln!(io::stdout(), "ERROR {e}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
+    }
     let options = match parse_args(std::env::args_os().skip(1)) {
         Ok(Some(options)) => options,
         Ok(None) => {

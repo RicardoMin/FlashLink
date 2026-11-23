@@ -12,6 +12,29 @@ pub struct Profile {
 }
 
 impl Profile {
+    /// Sunshine opens its output with truncation. Keep the most recent log that actually
+    /// contained a stream, including across Win+L and automatic engine restart. Moving the file
+    /// leaves only one copy and preserves its timestamp for the local diagnostics collector.
+    pub fn remember_stream_log(&self) {
+        use std::io::{BufRead, BufReader};
+        let Ok(log) = File::open(&self.log) else {
+            return;
+        };
+        let active = BufReader::new(log)
+            .split(b'\n')
+            .map_while(Result::ok)
+            .any(|line| {
+                line.windows(b": Info: CLIENT CONNECTED".len())
+                    .any(|s| s == b": Info: CLIENT CONNECTED")
+            });
+        if active {
+            let _ = fs::rename(
+                &self.log,
+                self.log.with_file_name("flashlink-sunshine-previous.log"),
+            );
+        }
+    }
+
     pub fn prepare(directory: &Path, port: u16) -> io::Result<Self> {
         let directory = std::path::absolute(directory)?;
         let root = directory.to_str().ok_or_else(|| invalid_path(&directory))?;
@@ -97,6 +120,24 @@ fn invalid_path(path: &Path) -> io::Error {
 mod tests {
     use super::*;
 
+    #[test]
+    fn restart_retains_last_stream_diagnostics_without_overwriting_with_idle_startup() {
+        let dir =
+            std::env::temp_dir().join(format!("flashlink-log-restart-{}", std::process::id()));
+        let profile = Profile::prepare(&dir, 47989).unwrap();
+        let sample = b"[time]: Info: CLIENT CONNECTED\n[time]: Info: Opus initialized: 48 kHz\n";
+        fs::write(&profile.log, sample).unwrap();
+        profile.remember_stream_log();
+        assert!(!profile.log.exists());
+        fs::write(&profile.log, b"[time]: Info: idle\n").unwrap();
+        profile.remember_stream_log();
+        assert_eq!(
+            fs::read(dir.join("flashlink-sunshine-previous.log")).unwrap(),
+            sample
+        );
+        drop(profile);
+        fs::remove_dir_all(dir).unwrap();
+    }
     #[test]
     fn profile_uses_local_state_and_preserves_pairing_across_runs() {
         let root = std::env::temp_dir().join(format!(

@@ -1,5 +1,5 @@
 diff --git a/app/build.gradle b/app/build.gradle
-index 9d13f4b..0a6f69e 100644
+index 9d13f4b..d04243e 100644
 --- a/app/build.gradle
 +++ b/app/build.gradle
 @@ -1,18 +1,19 @@
@@ -22,8 +22,8 @@ index 9d13f4b..0a6f69e 100644
  
 -        versionName "12.1"
 -        versionCode = 314
-+        versionName "0.2.0-demo"
-+        versionCode = 315
++        versionName "0.3.0-demo"
++        versionCode = 316
  
          // Generate native debug symbols to allow Google Play to symbolicate our native crashes
          ndk.debugSymbolLevel = 'FULL'
@@ -59,7 +59,7 @@ index 9d13f4b..0a6f69e 100644
      implementation 'org.bouncycastle:bcpkix-jdk15on:1.70'
      implementation 'org.jcodec:jcodec:0.2.3'
 diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
-index 7be9a20..ae9c6bd 100644
+index 7be9a20..4e5f545 100644
 --- a/app/src/main/AndroidManifest.xml
 +++ b/app/src/main/AndroidManifest.xml
 @@ -82,12 +82,31 @@
@@ -110,6 +110,53 @@ index 7be9a20..ae9c6bd 100644
          </activity>
          <!-- Small hack to support launcher shortcuts without relaunching over and over again when the back button is pressed -->
          <activity
+@@ -142,6 +154,30 @@
+             <meta-data android:name="WindowManagerPreference:FreeformWindowSize" android:value="system-default" />
+             <meta-data android:name="WindowManagerPreference:FreeformWindowOrientation" android:value="landscape" />
+         </activity>
++        <activity
++            android:name=".FlashLinkGame"
++            android:exported="false"
++            android:configChanges="mcc|mnc|locale|touchscreen|keyboard|keyboardHidden|navigation|screenLayout|fontScale|uiMode|orientation|screenSize|smallestScreenSize|layoutDirection"
++            android:supportsPictureInPicture="true"
++            android:resizeableActivity="true"
++            android:enableOnBackInvokedCallback="false"
++            android:excludeFromRecents="true"
++            android:theme="@style/StreamTheme"
++            android:preferMinimalPostProcessing="true">
++
++            <meta-data android:name="WindowManagerPreference:FreeformWindowSize" android:value="system-default" />
++            <meta-data android:name="WindowManagerPreference:FreeformWindowOrientation" android:value="landscape" />
++
++            <!-- Special metadata for NVIDIA Shield devices to prevent input buffering
++                 and most importantly, opt out of mouse acceleration while streaming -->
++            <meta-data
++                android:name="com.nvidia.immediateInput"
++                android:value="true" />
++            <meta-data
++                android:name="com.nvidia.rawCursorInput"
++                android:value="true" />
++        </activity>
++
+         <activity
+             android:name=".Game"
+             android:configChanges="mcc|mnc|locale|touchscreen|keyboard|keyboardHidden|navigation|screenLayout|fontScale|uiMode|orientation|screenSize|smallestScreenSize|layoutDirection"
+diff --git a/app/src/main/java/com/limelight/binding/video/MediaCodecDecoderRenderer.java b/app/src/main/java/com/limelight/binding/video/MediaCodecDecoderRenderer.java
+index 9bda0e6..f3d79ec 100644
+--- a/app/src/main/java/com/limelight/binding/video/MediaCodecDecoderRenderer.java
++++ b/app/src/main/java/com/limelight/binding/video/MediaCodecDecoderRenderer.java
+@@ -1425,5 +1425,11 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
+         // Flip stats windows roughly every second
+         if (SystemClock.uptimeMillis() >= activeWindowVideoStats.measurementStartTimestamp + 1000) {
++            // Sample the same completed window as the on-screen overlay, even with the UI hidden.
++            long windowMs = SystemClock.uptimeMillis() - activeWindowVideoStats.measurementStartTimestamp;
++            android.util.Log.i("FlashLinkSession", "VIDEO width=" + initialWidth + " height=" + initialHeight
++                    + " window_ms=" + windowMs + " received=" + activeWindowVideoStats.totalFramesReceived
++                    + " rendered=" + activeWindowVideoStats.totalFramesRendered + " lost=" + activeWindowVideoStats.framesLost
++                    + " decode_ms_total=" + activeWindowVideoStats.decoderTimeMs);
+             if (prefs.enablePerfOverlay) {
+                 VideoStats lastTwo = new VideoStats();
+                 lastTwo.add(lastWindowVideoStats);
 diff --git a/app/src/main/java/com/limelight/nvstream/http/NvHTTP.java b/app/src/main/java/com/limelight/nvstream/http/NvHTTP.java
 index 775a35e..f71fd2e 100644
 --- a/app/src/main/java/com/limelight/nvstream/http/NvHTTP.java

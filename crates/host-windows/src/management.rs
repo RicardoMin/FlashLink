@@ -47,6 +47,14 @@ pub struct Pending {
 }
 
 #[cfg(windows)]
+#[derive(serde::Deserialize)]
+pub struct PairedDevice {
+    pub uuid: String,
+    pub name: String,
+    pub enabled: bool,
+}
+
+#[cfg(windows)]
 pub struct Api {
     port: u16,
     authorization: String,
@@ -74,7 +82,7 @@ impl Api {
         })
     }
 
-    fn request(&self, method: &str, body: Value) -> Result<Value, String> {
+    fn request(&self, method: &str, path: &'static str, body: Value) -> Result<Value, String> {
         use std::io::{BufRead, BufReader, Read, Write};
         use std::net::{Ipv4Addr, SocketAddr, TcpStream};
         use std::time::Duration;
@@ -104,7 +112,7 @@ impl Api {
         } else {
             body.to_string()
         };
-        write!(stream,"{method} /api/pin HTTP/1.0\r\nHost: localhost:{}\r\nAuthorization: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",self.port,self.authorization,body.len()).map_err(|e|e.to_string())?;
+        write!(stream,"{method} {path} HTTP/1.0\r\nHost: localhost:{}\r\nAuthorization: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",self.port,self.authorization,body.len()).map_err(|e|e.to_string())?;
         stream.flush().map_err(|e| e.to_string())?;
         let mut reader = BufReader::new(stream.take(96 * 1024));
         let mut line = String::new();
@@ -142,20 +150,52 @@ impl Api {
             pairings: Vec<Pending>,
         }
         let response: Response =
-            serde_json::from_value(self.request("GET", Value::Null)?).map_err(|e| e.to_string())?;
+            serde_json::from_value(self.request("GET", "/api/pin", Value::Null)?)
+                .map_err(|e| e.to_string())?;
         Ok(response.pairings)
     }
 
     pub fn respond(&self, id: &str, allow: Option<(&str, &str)>) -> Result<bool, String> {
         let result = match allow {
-            Some((pin, name)) => {
-                self.request("POST", json!({"pairing_id":id,"pin":pin,"name":name}))?
-            }
-            None => self.request("DELETE", json!({"pairing_id":id}))?,
+            Some((pin, name)) => self.request(
+                "POST",
+                "/api/pin",
+                json!({"pairing_id":id,"pin":pin,"name":name}),
+            )?,
+            None => self.request("DELETE", "/api/pin", json!({"pairing_id":id}))?,
         };
         result["status"]
             .as_bool()
             .ok_or_else(|| "本机引擎未确认配对结果".into())
+    }
+
+    pub fn devices(&self) -> Result<Vec<PairedDevice>, String> {
+        #[derive(serde::Deserialize)]
+        struct List {
+            named_certs: Vec<PairedDevice>,
+        }
+        let list: List =
+            serde_json::from_value(self.request("GET", "/api/clients/list", Value::Null)?)
+                .map_err(|e| e.to_string())?;
+        Ok(list.named_certs)
+    }
+
+    pub fn revoke(&self, uuid: &str) -> Result<(), String> {
+        // Disabling also terminates a live stream for this certificate. Unpairing alone
+        // need not terminate it when other devices are still paired.
+        if self.request(
+            "POST",
+            "/api/clients/update",
+            json!({"uuid":uuid,"enabled":false}),
+        )?["status"]
+            != true
+        {
+            return Err("设备已变更，请重新打开设备列表。".into());
+        }
+        if self.request("POST", "/api/clients/unpair", json!({"uuid":uuid}))?["status"] != true {
+            return Err("设备已禁用，请刷新列表后重试移除。".into());
+        }
+        Ok(())
     }
 }
 

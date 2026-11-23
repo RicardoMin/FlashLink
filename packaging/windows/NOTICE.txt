@@ -21,3 +21,10 @@ Sunshine
 
 The licenses directory contains notices for the Rust dependencies, standard
 library and LLVM-MinGW runtime used to compile FlashLink.exe.
+
+Virtual Display Driver · MttVDD
+  Copyright (c) 2024 Virtual Display; MIT license, see licenses/MttVDD-LICENSE.
+  The FlashLink host embeds the unmodified amd64 INF, DLL, catalog and settings
+  from VirtualDisplayDriver-x86.Driver.Only.zip (release 25.7.23).
+  Upstream archive SHA-256: e24210692b442b39af763536330ce78b423f19342b7a7792c26de3944e418b3a
+  https://github.com/VirtualDrivers/Virtual-Display-Driver/releases/tag/25.7.23

@@ -1,0 +1,5 @@
+# Preserve the exact upstream archive entries across Windows and Unix checkouts.
+*.inf binary
+*.cat binary
+*.dll binary
+vdd_settings.xml binary
