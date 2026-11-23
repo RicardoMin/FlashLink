@@ -1,0 +1,31 @@
+# Rust, Flutter and release outputs
+/target/
+/dist/
+build/
+.dart_tool/
+.flutter-plugins-dependencies
+/apps/flashlink/.android/
+/apps/flashlink/.ios/
+
+# Android tooling and local signing keys
+.gradle/
+.cxx/
+.externalNativeBuild/
+local.properties
+key.properties
+*.jks
+*.keystore
+
+# Host identity and pairing data when a custom state directory is in the checkout
+flashlink-key.pem
+flashlink-cert.pem
+flashlink-state.json
+flashlink-gui-auth.json
+flashlink-demo.lock
+flashlink-sunshine.log
+
+# Python and desktop tooling
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db

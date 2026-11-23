@@ -1,0 +1,368 @@
+diff --git a/app/build.gradle b/app/build.gradle
+index 9d13f4b..0a6f69e 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -1,18 +1,19 @@
+ apply plugin: 'com.android.application'
+ 
+ android {
+-    ndkVersion "23.2.8568313"
++    ndkVersion project.property("flashlinkNdkVersion")
+ 
+-    compileSdk 34
++    compileSdk 36
+ 
+     namespace 'com.limelight'
+ 
+     defaultConfig {
+-        minSdk 16
++        minSdk 24
++        ndk { abiFilters "arm64-v8a" }
+         targetSdk 34
+ 
+-        versionName "12.1"
+-        versionCode = 314
++        versionName "0.2.0-demo"
++        versionCode = 315
+ 
+         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
+         ndk.debugSymbolLevel = 'FULL'
+@@ -48,7 +49,7 @@ android {
+                 }
+             }
+ 
+-            applicationId "com.limelight"
++            applicationId "dev.flashlink.demo"
+             dimension "root"
+             buildConfigField "boolean", "ROOT_BUILD", "false"
+         }
+@@ -82,11 +83,10 @@ android {
+     buildTypes {
+         debug {
+             applicationIdSuffix ".debug"
+-            resValue "string", "app_label", "Moonlight (Debug)"
++            resValue "string", "app_label", "FlashLink"
+             resValue "string", "app_label_root", "Moonlight (Root Debug)"
+ 
+-            minifyEnabled true
+-            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
++            minifyEnabled false
+         }
+         release {
+             // To whomever is releasing/using an APK in release mode with
+@@ -136,6 +136,7 @@ android {
+ }
+ 
+ dependencies {
++    implementation project.property('flashlinkFlutterArtifact')
+     implementation 'org.bouncycastle:bcprov-jdk15on:1.70'
+     implementation 'org.bouncycastle:bcpkix-jdk15on:1.70'
+     implementation 'org.jcodec:jcodec:0.2.3'
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index 7be9a20..ae9c6bd 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -82,12 +82,31 @@
+             android:name="android.game_mode_config"
+             android:resource="@xml/game_mode_config" />
+ 
++        <meta-data android:name="flutterEmbedding" android:value="2" />
++        <activity
++            android:name=".FlashLinkActivity"
++            android:exported="true"
++            android:theme="@android:style/Theme.Material.Light.NoActionBar"
++            android:hardwareAccelerated="true"
++            android:windowSoftInputMode="adjustResize"
++            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode">
++            <intent-filter>
++                <action android:name="android.intent.action.MAIN" />
++                <category android:name="android.intent.category.LAUNCHER" />
++            </intent-filter>
++        </activity>
++
++        <activity android:name=".FlashLinkSessionActivity"
++            android:exported="false"
++            android:theme="@android:style/Theme.Material.Light.NoActionBar"
++            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode" />
++
+         <!-- Samsung DeX support requires explicit placement of android:resizeableActivity="true"
+              in each activity even though it is implied by targeting API 24+ -->
+ 
+         <activity
+             android:name=".PcView"
+-            android:exported="true"
++            android:exported="false"
+             android:resizeableActivity="true"
+             android:enableOnBackInvokedCallback="true"
+             android:configChanges="mcc|mnc|touchscreen|keyboard|keyboardHidden|navigation|screenLayout|fontScale|uiMode|orientation|screenSize|smallestScreenSize|layoutDirection">
+@@ -95,14 +114,7 @@
+             <meta-data android:name="WindowManagerPreference:FreeformWindowSize" android:value="system-default" />
+             <meta-data android:name="WindowManagerPreference:FreeformWindowOrientation" android:value="landscape" />
+ 
+-            <intent-filter>
+-                <action android:name="android.intent.action.MAIN" />
+ 
+-                <category android:name="android.intent.category.LAUNCHER" />
+-                <category android:name="android.intent.category.MULTIWINDOW_LAUNCHER" />
+-                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+-                <category android:name="tv.ouya.intent.category.APP" />
+-            </intent-filter>
+         </activity>
+         <!-- Small hack to support launcher shortcuts without relaunching over and over again when the back button is pressed -->
+         <activity
+diff --git a/app/src/main/java/com/limelight/nvstream/http/NvHTTP.java b/app/src/main/java/com/limelight/nvstream/http/NvHTTP.java
+index 775a35e..f71fd2e 100644
+--- a/app/src/main/java/com/limelight/nvstream/http/NvHTTP.java
++++ b/app/src/main/java/com/limelight/nvstream/http/NvHTTP.java
+@@ -71,7 +71,28 @@ public class NvHTTP {
+     public static final int READ_TIMEOUT = 7000;
+ 
+     // Print URL and content to logcat on debug builds
+-    private static boolean verbose = BuildConfig.DEBUG;
++    private static boolean verbose = false;
++    private String pairingName = "roth";
++    private boolean flashLinkClosed;
++    private okhttp3.Call flashLinkCall;
++
++    public String getAuthenticatedServerInfo() throws IOException, XmlPullParserException {
++        if (serverCert == null) throw new IOException("Missing pinned certificate");
++        String info = openHttpConnectionToString(httpClientLongConnectTimeout, getHttpsUrl(true), "serverinfo");
++        getXmlString(info, "uniqueid", true);
++        return info;
++    }
++
++    public void setFlashLinkPairing(String token, X509Certificate expected) {
++        if (!token.matches("[a-f0-9]{32}")) throw new IllegalArgumentException("Invalid token");
++        pairingName = "FlashLink-" + token;
++        pm.expectedFlashLinkCert = expected;
++    }
++
++    public synchronized void cancelFlashLinkRequests() {
++        flashLinkClosed = true;
++        if (flashLinkCall != null) flashLinkCall.cancel();
++    }
+ 
+     private HttpUrl baseUrlHttp;
+ 
+@@ -134,6 +155,12 @@ public class NvHTTP {
+                 throw new IllegalStateException("Should never be called");
+             }
+             public void checkServerTrusted(X509Certificate[] certs, String authType) throws CertificateException {
++                if (NvHTTP.this.serverCert != null) {
++                    if (certs.length == 0 || !NvHTTP.this.serverCert.equals(certs[0])) {
++                        throw new CertificateException("Pinned server certificate mismatch");
++                    }
++                    return;
++                }
+                 try {
+                     // Try the default trust manager first to allow pairing with certificates
+                     // that chain up to a trusted root CA. This will raise CertificateException
+@@ -438,7 +465,12 @@ public class NvHTTP {
+     private ResponseBody openHttpConnection(OkHttpClient client, HttpUrl baseUrl, String path, String query) throws IOException {
+         HttpUrl completeUrl = getCompleteUrl(baseUrl, path, query);
+         Request request = new Request.Builder().url(completeUrl).get().build();
+-        Response response = performAndroidTlsHack(client).newCall(request).execute();
++        okhttp3.Call call = performAndroidTlsHack(client).newCall(request);
++        synchronized (this) {
++            if (flashLinkClosed) throw new IOException("Session closed");
++            flashLinkCall = call;
++        }
++        Response response = call.execute();
+ 
+         ResponseBody body = response.body();
+         
+@@ -703,12 +735,12 @@ public class NvHTTP {
+ 
+     String executePairingCommand(String additionalArguments, boolean enableReadTimeout) throws HostHttpResponseException, IOException {
+         return openHttpConnectionToString(enableReadTimeout ? httpClientLongConnectTimeout : httpClientLongConnectNoReadTimeout,
+-                baseUrlHttp, "pair", "devicename=roth&updateState=1&" + additionalArguments);
++                baseUrlHttp, "pair", "devicename=" + pairingName + "&updateState=1&" + additionalArguments);
+     }
+ 
+     String executePairingChallenge() throws HostHttpResponseException, IOException {
+         return openHttpConnectionToString(httpClientLongConnectTimeout, getHttpsUrl(true),
+-                "pair", "devicename=roth&updateState=1&phrase=pairchallenge");
++                "pair", "devicename=" + pairingName + "&updateState=1&phrase=pairchallenge");
+     }
+ 
+     public void unpair() throws IOException {
+diff --git a/app/src/main/java/com/limelight/nvstream/http/PairingManager.java b/app/src/main/java/com/limelight/nvstream/http/PairingManager.java
+index 65994b6..83551b4 100644
+--- a/app/src/main/java/com/limelight/nvstream/http/PairingManager.java
++++ b/app/src/main/java/com/limelight/nvstream/http/PairingManager.java
+@@ -24,6 +24,7 @@ public class PairingManager {
+     private byte[] pemCertBytes;
+ 
+     private X509Certificate serverCert;
++    X509Certificate expectedFlashLinkCert;
+     
+     public enum PairState {
+         NOT_PAIRED,
+@@ -213,6 +214,9 @@ public class PairingManager {
+ 
+         // Save this cert for retrieval later
+         serverCert = extractPlainCert(getCert);
++        if (expectedFlashLinkCert != null && !expectedFlashLinkCert.equals(serverCert)) {
++            throw new IOException("Unexpected pairing certificate");
++        }
+         if (serverCert == null) {
+             // Attempting to pair while another device is pairing will cause GFE
+             // to give an empty cert in the response.
+diff --git a/app/src/main/java/com/limelight/utils/ServerHelper.java b/app/src/main/java/com/limelight/utils/ServerHelper.java
+index ef5a790..3d95fa0 100644
+--- a/app/src/main/java/com/limelight/utils/ServerHelper.java
++++ b/app/src/main/java/com/limelight/utils/ServerHelper.java
+@@ -54,6 +54,10 @@ public class ServerHelper {
+ 
+     public static Intent createStartIntent(Activity parent, NvApp app, ComputerDetails computer,
+                                            ComputerManagerService.ComputerManagerBinder managerBinder) {
++        return createStartIntent(parent, app, computer, managerBinder.getUniqueId());
++    }
++
++    public static Intent createStartIntent(Activity parent, NvApp app, ComputerDetails computer, String uniqueId) {
+         Intent intent = new Intent(parent, Game.class);
+         intent.putExtra(Game.EXTRA_HOST, computer.activeAddress.address);
+         intent.putExtra(Game.EXTRA_PORT, computer.activeAddress.port);
+@@ -61,7 +65,7 @@ public class ServerHelper {
+         intent.putExtra(Game.EXTRA_APP_NAME, app.getAppName());
+         intent.putExtra(Game.EXTRA_APP_ID, app.getAppId());
+         intent.putExtra(Game.EXTRA_APP_HDR, app.isHdrSupported());
+-        intent.putExtra(Game.EXTRA_UNIQUEID, managerBinder.getUniqueId());
++        intent.putExtra(Game.EXTRA_UNIQUEID, uniqueId);
+         intent.putExtra(Game.EXTRA_PC_UUID, computer.uuid);
+         intent.putExtra(Game.EXTRA_PC_NAME, computer.name);
+         try {
+diff --git a/app/src/main/jni/Application.mk b/app/src/main/jni/Application.mk
+index 3261560..0396048 100644
+--- a/app/src/main/jni/Application.mk
++++ b/app/src/main/jni/Application.mk
+@@ -1,4 +1,4 @@
+ # Application.mk for Moonlight
+ 
+ # Our minimum version is Android 4.1
+-APP_PLATFORM := android-16
++APP_PLATFORM := android-24
+diff --git a/app/src/main/jni/moonlight-core/Android.mk b/app/src/main/jni/moonlight-core/Android.mk
+index bf517ac..8a4a64e 100644
+--- a/app/src/main/jni/moonlight-core/Android.mk
++++ b/app/src/main/jni/moonlight-core/Android.mk
+@@ -55,9 +55,7 @@ endif
+ 
+ LOCAL_LDLIBS := -llog
+ 
+-LOCAL_STATIC_LIBRARIES := libopus libssl libcrypto cpufeatures
++LOCAL_STATIC_LIBRARIES := libopus libssl libcrypto
+ LOCAL_LDFLAGS += -Wl,--exclude-libs,ALL
+ 
+ include $(BUILD_SHARED_LIBRARY)
+-
+-$(call import-module,android/cpufeatures)
+\ No newline at end of file
+diff --git a/app/src/main/jni/moonlight-core/callbacks.c b/app/src/main/jni/moonlight-core/callbacks.c
+index 6b6e13a..f7d7b1c 100644
+--- a/app/src/main/jni/moonlight-core/callbacks.c
++++ b/app/src/main/jni/moonlight-core/callbacks.c
+@@ -8,7 +8,6 @@
+ #include <opus_multistream.h>
+ #include <android/log.h>
+ 
+-#include <cpu-features.h>
+ 
+ static OpusMSDecoder* Decoder;
+ static OPUS_MULTISTREAM_CONFIGURATION OpusConfig;
+@@ -428,29 +427,6 @@ static CONNECTION_LISTENER_CALLBACKS BridgeConnListenerCallbacks = {
+         .setControllerLED = BridgeClSetControllerLED,
+ };
+ 
+-static bool
+-hasFastAes() {
+-    if (android_getCpuCount() <= 2) {
+-        return false;
+-    }
+-
+-    switch (android_getCpuFamily()) {
+-        case ANDROID_CPU_FAMILY_ARM:
+-            return !!(android_getCpuFeatures() & ANDROID_CPU_ARM_FEATURE_AES);
+-        case ANDROID_CPU_FAMILY_ARM64:
+-            return !!(android_getCpuFeatures() & ANDROID_CPU_ARM64_FEATURE_AES);
+-        case ANDROID_CPU_FAMILY_X86:
+-        case ANDROID_CPU_FAMILY_X86_64:
+-            return !!(android_getCpuFeatures() & ANDROID_CPU_X86_FEATURE_AES_NI);
+-        case ANDROID_CPU_FAMILY_MIPS:
+-        case ANDROID_CPU_FAMILY_MIPS64:
+-            return false;
+-        default:
+-            // Assume new architectures will all have crypto acceleration (RISC-V will)
+-            return true;
+-    }
+-}
+-
+ JNIEXPORT jint JNICALL
+ Java_com_limelight_nvstream_jni_MoonBridge_startConnection(JNIEnv *env, jclass clazz,
+                                                            jstring address, jstring appVersion, jstring gfeVersion,
+@@ -479,7 +455,7 @@ Java_com_limelight_nvstream_jni_MoonBridge_startConnection(JNIEnv *env, jclass c
+             .audioConfiguration = audioConfiguration,
+             .supportedVideoFormats = supportedVideoFormats,
+             .clientRefreshRateX100 = clientRefreshRateX100,
+-            .encryptionFlags = ENCFLG_AUDIO,
++            .encryptionFlags = ENCFLG_ALL,
+             .colorSpace = colorSpace,
+             .colorRange = colorRange
+     };
+@@ -494,11 +470,6 @@ Java_com_limelight_nvstream_jni_MoonBridge_startConnection(JNIEnv *env, jclass c
+ 
+     BridgeVideoRendererCallbacks.capabilities = videoCapabilities;
+ 
+-    // Enable all encryption features if the platform has fast AES support
+-    if (hasFastAes()) {
+-        streamConfig.encryptionFlags = ENCFLG_ALL;
+-    }
+-
+     int ret = LiStartConnection(&serverInfo,
+                                 &streamConfig,
+                                 &BridgeConnListenerCallbacks,
+diff --git a/build.gradle b/build.gradle
+index 9cba6a5..aee4e11 100644
+--- a/build.gradle
++++ b/build.gradle
+@@ -5,7 +5,7 @@ buildscript {
+         google()
+     }
+     dependencies {
+-        classpath 'com.android.tools.build:gradle:8.2.2'
++        classpath 'com.android.tools.build:gradle:8.11.1'
+     }
+ }
+ 
+@@ -14,5 +14,7 @@ allprojects {
+         mavenCentral()
+         google()
+         maven { url 'https://jitpack.io' }
++        maven { url uri(project.property('flashlinkFlutterRepo')) }
++        maven { url 'https://storage.googleapis.com/download.flutter.io' }
+     }
+ }
+diff --git a/gradle.properties b/gradle.properties
+index e021211..f27764b 100644
+--- a/gradle.properties
++++ b/gradle.properties
+@@ -16,4 +16,6 @@ org.gradle.jvmargs=-Xmx3072m
+ # When configured, Gradle will run in incubating parallel mode.
+ # This option should only be used with decoupled projects. More details, visit
+ # http://www.gradle.org/docs/current/userguide/multi_project_builds.html#sec:decoupled_projects
+-# org.gradle.parallel=true
+\ No newline at end of file
++# org.gradle.parallel=true
++
++android.useAndroidX=true
+diff --git a/gradle/wrapper/gradle-wrapper.properties b/gradle/wrapper/gradle-wrapper.properties
+index 15de902..5c82cb0 100644
+--- a/gradle/wrapper/gradle-wrapper.properties
++++ b/gradle/wrapper/gradle-wrapper.properties
+@@ -1,5 +1,5 @@
+ distributionBase=GRADLE_USER_HOME
+ distributionPath=wrapper/dists
+-distributionUrl=https\://services.gradle.org/distributions/gradle-8.2-bin.zip
++distributionUrl=https\://services.gradle.org/distributions/gradle-8.14-bin.zip
+ zipStoreBase=GRADLE_USER_HOME
+ zipStorePath=wrapper/dists
