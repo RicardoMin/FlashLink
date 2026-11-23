@@ -23,6 +23,12 @@ flashlink-state.json
 flashlink-gui-auth.json
 flashlink-demo.lock
 flashlink-sunshine.log
+flashlink-sunshine-previous.log
+privacy-events.log
+privacy-guard.lock
+privacy-restore.pending
+privacy-local-restore.request
+privacy-*.tmp
 
 # Python and desktop tooling
 __pycache__/

@@ -1,6 +1,6 @@
 # FlashLink 当前架构
 
-FlashLink `0.2.0-demo` 在同一 IPv4 局域网内，把已登录、已解锁的 Windows 10/11 x64 桌面串流到 Android arm64 手机或平板。Windows 应用管理 Sunshine 的生命周期和首次授权，Android 应用发现主机并启动内嵌的 Moonlight 播放器。两端保存配对身份，后续连接可以直接进入桌面。
+FlashLink `0.3.0-demo` 在同一 IPv4 局域网内，把已登录、已解锁的 Windows 10/11 x64 桌面串流到 Android arm64 手机或平板。Windows 应用管理 Sunshine 的生命周期和首次授权，Android 应用发现主机并启动内嵌的 Moonlight 播放器。两端保存配对身份，后续连接可以直接进入桌面。
 
 ## 运行时与代码入口
 
@@ -40,8 +40,14 @@ flowchart LR
 3. **保存身份。** Moonlight 完成握手并核对主机证书后，Android 将主机身份写入其设备库；Sunshine 保存已授权的客户端身份。Windows 默认将主机证书、配对记录和日志保存在当前用户的 `%LOCALAPPDATA%\FlashLink\DemoHost`。[客户端身份处理](../packaging/android/FlashLinkSessionActivity.java) · [Windows 配置目录](../crates/host-windows/src/profile.rs)
 4. **再次连接。** Android 从新的发现应答取得最新地址，用保存的证书验证主机和配对状态，通过已认证连接查询 `Desktop` 的实际应用 ID，再启动原生播放器。电脑更换局域网 IP 后仍可按证书识别；主机证书变化或配对已失效时，需要重新确认。
 
+## 播放、重连与隐私
+
+Flutter 呈现手机设备列表及平板的列表／详情双栏。串流打开后由 Android 原生播放器管理覆盖在画面上的鼠标和工具面板。重连逻辑监听实际媒体回调，使用单调时钟、退避间隔与 15 秒期限；只使用已配对身份，主动断开不触发重连。播放器将分时段的接收帧、提交至 Surface 的帧以及丢帧写入诊断计数。[原生播放器](../packaging/android/FlashLinkGame.java) · [重连策略](../packaging/android/FlashLinkReconnect.java)
+
+Windows 主进程提供系统托盘、逐设备撤销和报告导出。启用隐私后，独立 Rust 守护进程保存显示恢复信息，调用 Windows 显示配置 API，仅启用已识别的 MttVDD 虚拟输出并检查活动显示路径。安卓在原生播放器运行时通过双向 TLS 发送心跳；主机按 Sunshine 中已授权的客户端证书验证身份。心跳中断约 5 秒后进入 15 秒宽限期；期限结束后，守护进程停止串流、请求 Windows 锁定、确认会话锁定，再恢复显示。主机确认恢复完成且本机已解锁后重新开启引擎与发现，沿用原配对记录。诊断文件记录这些状态的先后顺序。[显示拓扑](../crates/host-windows/src/privacy_display.rs) · [隐私守护进程](../crates/host-windows/src/privacy.rs) · [安卓心跳](../packaging/android/FlashLinkPrivacyLease.java)
+
 ## 构建与验证范围
 
 Windows 打包工具把 Rust 主程序与固定版本 Sunshine `v2026.914.233613` 生成离线单文件 EXE 和便携 ZIP。Android 构建脚本从固定提交的 Moonlight Android `v12.1` 应用补丁，将 Flutter AAR、Rust 动态库和 Moonlight 原生库打进同一个 APK。[Windows 打包](../packaging/windows/bundle.py) · [Android 构建](../scripts/android_demo.py)
 
-Android 模拟器与隔离 Linux 主机上的真实 Sunshine 已验证首次配对、再次直连、720p 软件编码桌面画面及点按回传。Windows x64 主程序已交叉编译并检查打包。Windows 实体机器的 GPU 编码、实际听感以及 1440p/60 FPS 和 120 FPS 表现仍待真机验证。当前被控电脑的物理屏幕会显示串流画面。
+Android 模拟器与隔离 Linux 主机上的真实 Sunshine 已验证首次配对、再次直连、720p 软件编码桌面画面及点按回传。Windows x64 主程序已交叉编译并检查打包。Windows 实体机器的 GPU 编码、实际听感以及 1440p/60 FPS 和 120 FPS 表现仍待真机验证。Windows 隐私切屏、多屏热插拔、异常退出时是否短暂露出桌面，以及锁屏后能否恢复原显示目标，均需实体显示器验收。

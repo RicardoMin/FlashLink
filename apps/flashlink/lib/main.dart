@@ -1,19 +1,22 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'connection.dart';
+import 'device_cover.dart';
 import 'player.dart';
 import 'session.dart';
 
 void main() => runApp(const FlashLinkApp());
 
-const _ink = Color(0xff15312c);
-const _muted = Color(0xff526760);
-const _green = Color(0xff176d58);
-const _mint = Color(0xffa7f2cc);
-const _paper = Color(0xfff5f7f3);
-const _line = Color(0xffd7dfd7);
+const _ink = Color(0xff191e25);
+const _muted = Color(0xff5d6773);
+const _blue = Color(0xff327bfa);
+const _paper = Color(0xfff1f5f8);
+const _tint = Color(0xffe5ebef);
+const _heading =
+    TextStyle(color: _ink, fontSize: 25, fontWeight: FontWeight.w700);
 
 class FlashLinkApp extends StatelessWidget {
   const FlashLinkApp({super.key, this.controller});
@@ -25,27 +28,34 @@ class FlashLinkApp extends StatelessWidget {
         debugShowCheckedModeBanner: false,
         theme: ThemeData(
           useMaterial3: true,
-          colorScheme:
-              ColorScheme.fromSeed(seedColor: _green).copyWith(primary: _green),
+          colorScheme: ColorScheme.fromSeed(seedColor: _blue)
+              .copyWith(primary: _blue, surface: Colors.white),
           scaffoldBackgroundColor: _paper,
-          dividerColor: _line,
+          splashFactory: InkRipple.splashFactory,
         ),
-        home: _DevicePage(controller: controller),
+        home: _Home(controller: controller),
       );
 }
 
-class _DevicePage extends StatefulWidget {
-  const _DevicePage({this.controller});
-  final ConnectionController? controller;
+enum _Tab { devices, help, settings }
 
+enum _Filter { all, online }
+
+class _Home extends StatefulWidget {
+  const _Home({this.controller});
+  final ConnectionController? controller;
   @override
-  State<_DevicePage> createState() => _DevicePageState();
+  State<_Home> createState() => _HomeState();
 }
 
-class _DevicePageState extends State<_DevicePage> with WidgetsBindingObserver {
+class _HomeState extends State<_Home> with WidgetsBindingObserver {
   late final controller = widget.controller ??
       ConnectionController(NativeSessionCore.new, AndroidPlayer());
   Timer? _poll;
+  var _tab = _Tab.devices;
+  var _filter = _Filter.all;
+  bool _showOnline = true, _showMissing = true;
+  String? _selected;
 
   @override
   void initState() {
@@ -78,334 +88,461 @@ class _DevicePageState extends State<_DevicePage> with WidgetsBindingObserver {
     super.dispose();
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      body: SafeArea(
-        child: Center(
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 1100),
-            child: LayoutBuilder(builder: (context, box) {
-              final wide = box.maxWidth >= 780;
-              return ListenableBuilder(
-                  listenable: controller,
-                  builder: (context, _) {
-                    final busy = controller.phase != SessionPhase.idle;
-                    final nearby = controller.nearby;
-                    final missing = controller.unavailable;
-                    final firstScan = !controller.scanned;
-                    final devices = Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          if (nearby.isEmpty)
-                            _DiscoveryState(
-                                scanning: firstScan,
-                                failure: controller.discoveryError)
-                          else
-                            for (final device in nearby)
-                              Padding(
-                                padding: const EdgeInsets.only(bottom: 12),
-                                child: _DeviceCard(
-                                  device: device,
-                                  opening: device.id == controller.activeDevice,
-                                  onTap: busy
-                                      ? null
-                                      : () => controller.connect(device),
-                                ),
-                              ),
-                          if (missing.isNotEmpty) ...[
-                            const SizedBox(height: 20),
-                            const Text('此前发现',
-                                style: TextStyle(
-                                    fontSize: 16,
-                                    fontWeight: FontWeight.w700,
-                                    color: _ink)),
-                            const SizedBox(height: 10),
-                            for (final device in missing)
-                              ListTile(
-                                contentPadding:
-                                    const EdgeInsets.symmetric(horizontal: 8),
-                                leading: const Icon(
-                                    Icons.desktop_windows_outlined,
-                                    color: _muted),
-                                title: Text(device.name,
-                                    maxLines: 2,
-                                    overflow: TextOverflow.ellipsis),
-                                trailing: Text(
-                                    controller.discoveryError == null
-                                        ? '本次未发现'
-                                        : '状态待确认',
-                                    style: const TextStyle(color: _muted)),
-                              ),
-                          ],
-                          if (controller.feedback != null) ...[
-                            const SizedBox(height: 12),
-                            Semantics(
-                                liveRegion: true,
-                                child: Text(controller.feedback!,
-                                    style: TextStyle(
-                                        color: Theme.of(context)
-                                            .colorScheme
-                                            .error))),
-                          ],
-                        ]);
-                    return RefreshIndicator(
-                      onRefresh: controller.discover,
-                      child: ListView(
-                        physics: const AlwaysScrollableScrollPhysics(),
-                        padding: EdgeInsets.fromLTRB(
-                            wide ? 48 : 20, wide ? 28 : 14, wide ? 48 : 20, 32),
-                        children: [
-                          Row(children: [
-                            Container(
-                              height: 36,
-                              width: 36,
-                              decoration: BoxDecoration(
-                                  color: _ink,
-                                  borderRadius: BorderRadius.circular(11)),
-                              child: const Icon(Icons.bolt_rounded,
-                                  color: _mint, size: 29),
-                            ),
-                            const SizedBox(width: 9),
-                            const Expanded(
-                                child: Text('FlashLink',
-                                    style: TextStyle(
-                                        color: _ink,
-                                        fontSize: 22,
-                                        fontWeight: FontWeight.w800,
-                                        letterSpacing: -.8))),
-                            TextButton.icon(
-                              icon: const Icon(Icons.tune_rounded, size: 19),
-                              onPressed: busy ? null : controller.openSettings,
-                              label: const Text('播放设置'),
-                            ),
-                          ]),
-                          const SizedBox(height: 16),
-                          const Divider(height: 1),
-                          SizedBox(height: wide ? 40 : 26),
-                          Row(
-                              crossAxisAlignment: CrossAxisAlignment.center,
-                              children: [
-                                const Expanded(
-                                    child: Text('附近的电脑',
-                                        style: TextStyle(
-                                            fontSize: 32,
-                                            fontWeight: FontWeight.w800,
-                                            height: 1.2,
-                                            color: _ink))),
-                                IconButton.filledTonal(
-                                  style: IconButton.styleFrom(
-                                      backgroundColor: const Color(0xffe3eee3),
-                                      foregroundColor: _green),
-                                  onPressed: busy || controller.scanning
-                                      ? null
-                                      : controller.discover,
-                                  tooltip: '刷新设备',
-                                  icon: const Icon(Icons.refresh_rounded),
-                                ),
-                              ]),
-                          const SizedBox(height: 8),
-                          Text(
-                              nearby.isNotEmpty
-                                  ? '选择一台电脑，连接它的 Windows 桌面。'
-                                  : '自动查找同一局域网中的 FlashLink 电脑。',
-                              style: const TextStyle(
-                                  fontSize: 15, height: 1.45, color: _muted)),
-                          const SizedBox(height: 23),
-                          if (wide)
-                            Row(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Expanded(flex: 5, child: devices),
-                                  const SizedBox(width: 22),
-                                  const Expanded(
-                                      flex: 3, child: _ConnectionGuide()),
-                                ])
-                          else ...[
-                            devices,
-                            const SizedBox(height: 16),
-                            const _ConnectionGuide(),
-                          ],
-                        ],
-                      ),
-                    );
-                  });
-            }),
-          ),
-        ),
-      ),
-    );
+  void _openDetail(NearbyDevice device, bool wide) {
+    setState(() => _selected = device.id);
+    if (wide) return;
+    Navigator.of(context).push(MaterialPageRoute<void>(
+        builder: (context) => Scaffold(
+              appBar:
+                  AppBar(title: const Text('设备详情'), backgroundColor: _paper),
+              body: SafeArea(
+                  child: ListenableBuilder(
+                      listenable: controller,
+                      builder: (context, _) => ListView(
+                          padding: const EdgeInsets.all(16),
+                          children: [_detail(device)]))),
+            )));
   }
-}
 
-class _DeviceCard extends StatelessWidget {
-  const _DeviceCard(
-      {required this.device, required this.opening, required this.onTap});
-  final NearbyDevice device;
-  final bool opening;
-  final VoidCallback? onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    const light = Color(0xffd8eae0);
-    return Semantics(
-      container: true,
-      button: true,
-      enabled: onTap != null,
-      label: '连接 ${device.name}',
-      child: Material(
-        color: _ink,
-        borderRadius: BorderRadius.circular(22),
-        clipBehavior: Clip.antiAlias,
-        child: InkWell(
-          onTap: onTap,
-          child: Padding(
-            padding: const EdgeInsets.all(23),
-            child:
-                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Row(children: [
-                Container(
-                  padding: const EdgeInsets.all(10),
-                  decoration: BoxDecoration(
-                      color: const Color(0xff2a4b41),
-                      borderRadius: BorderRadius.circular(12)),
-                  child: const Icon(Icons.desktop_windows_rounded,
-                      color: _mint, size: 28),
-                ),
-                const Spacer(),
-                const Icon(Icons.circle, size: 8, color: _mint),
-                const SizedBox(width: 6),
-                const Text('已发现', style: TextStyle(color: light)),
-              ]),
-              const SizedBox(height: 23),
-              Text(device.name,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                      fontSize: 25,
-                      fontWeight: FontWeight.w700,
-                      color: Colors.white,
-                      height: 1.18)),
-              const SizedBox(height: 6),
-              const Text('Windows 电脑', style: TextStyle(color: light)),
-              const SizedBox(height: 18),
-              const Divider(height: 1, color: Color(0xff436158)),
-              const SizedBox(height: 14),
-              Row(children: [
-                Expanded(
-                    child: Text(opening ? '正在打开连接…' : '连接电脑',
-                        style: const TextStyle(
-                            color: _mint,
-                            fontSize: 15,
-                            fontWeight: FontWeight.w700))),
-                const Icon(Icons.arrow_forward_rounded, color: _mint, size: 21),
-              ]),
+  Widget _detail(NearbyDevice device) {
+    final online =
+        controller.nearby.where((d) => d.id == device.id).firstOrNull;
+    final opening = controller.activeDevice == device.id;
+    final busy = controller.phase != SessionPhase.idle;
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      Row(children: [
+        _Status(
+            online: online != null,
+            uncertain: controller.discoveryError != null),
+        const SizedBox(width: 8),
+        Expanded(
+            child: Text(online?.name ?? device.name,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: _heading.copyWith(fontSize: 22))),
+      ]),
+      const SizedBox(height: 16),
+      Material(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(12),
+          clipBehavior: Clip.antiAlias,
+          child: Column(children: [
+            AspectRatio(
+                aspectRatio: 16 / 9,
+                child: Stack(fit: StackFit.expand, children: [
+                  DeviceCover(available: online != null),
+                  const DecoratedBox(
+                      decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                              begin: Alignment.center,
+                              end: Alignment.bottomCenter,
+                              colors: [
+                        Colors.transparent,
+                        Color(0xaa0b2451)
+                      ]))),
+                  Material(
+                      type: MaterialType.transparency,
+                      child: InkWell(
+                          onTap: busy || online == null
+                              ? null
+                              : () => controller.connect(online),
+                          child: Align(
+                              alignment: const Alignment(0, .8),
+                              child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Text(
+                                        opening
+                                            ? '正在连接…'
+                                            : online != null
+                                                ? '进入桌面'
+                                                : '设备不可用',
+                                        style: const TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 18,
+                                            fontWeight: FontWeight.w600)),
+                                    if (online != null)
+                                      const Icon(Icons.chevron_right,
+                                          color: Colors.white),
+                                  ])))),
+                ])),
+            Row(children: [
+              Expanded(
+                  child: TextButton.icon(
+                      onPressed: busy ? null : controller.openSettings,
+                      icon: const Icon(Icons.tune_rounded),
+                      label: const Text('播放设置'))),
+              const SizedBox(height: 18, child: VerticalDivider(width: 1)),
+              Expanded(
+                  child: TextButton.icon(
+                      onPressed:
+                          controller.scanning ? null : controller.discover,
+                      icon: const Icon(Icons.refresh_rounded),
+                      label: const Text('刷新状态'))),
             ]),
-          ),
+          ])),
+      if (controller.feedback case final feedback?) _Feedback(feedback),
+    ]);
+  }
+
+  @override
+  Widget build(BuildContext context) => AnnotatedRegion<SystemUiOverlayStyle>(
+        value: const SystemUiOverlayStyle(
+            statusBarColor: Colors.transparent,
+            statusBarIconBrightness: Brightness.dark,
+            systemNavigationBarColor: Color(0xfff9fbfc),
+            systemNavigationBarIconBrightness: Brightness.dark),
+        child: Scaffold(
+          bottomNavigationBar: DecoratedBox(
+              decoration: const BoxDecoration(
+                  border: Border(top: BorderSide(color: Color(0x150c2440)))),
+              child: BottomNavigationBar(
+                elevation: 0,
+                backgroundColor: const Color(0xfff9fbfc),
+                selectedItemColor: _blue,
+                unselectedItemColor: _muted,
+                currentIndex: _tab.index,
+                onTap: (i) => setState(() => _tab = _Tab.values[i]),
+                selectedFontSize: 12,
+                unselectedFontSize: 12,
+                items: const [
+                  BottomNavigationBarItem(
+                      icon: Icon(Icons.devices_outlined),
+                      activeIcon: Icon(Icons.devices_rounded),
+                      label: '我的设备'),
+                  BottomNavigationBarItem(
+                      icon: Icon(Icons.help_outline_rounded),
+                      activeIcon: Icon(Icons.help_rounded),
+                      label: '连接帮助'),
+                  BottomNavigationBarItem(
+                      icon: Icon(Icons.tune_rounded), label: '设置'),
+                ],
+              )),
+          body: SafeArea(
+              child: Align(
+                  alignment: Alignment.topCenter,
+                  child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 1140),
+                      child: ListenableBuilder(
+                          listenable: controller,
+                          builder: (context, _) =>
+                              LayoutBuilder(builder: _page))))),
         ),
-      ),
-    );
+      );
+  Widget _page(BuildContext context, BoxConstraints box) {
+    final wide = box.maxWidth >= 800;
+    final padding =
+        EdgeInsets.fromLTRB(wide ? 32 : 16, wide ? 28 : 18, wide ? 32 : 16, 24);
+    if (_tab == _Tab.help) {
+      return ListView(padding: padding, children: const [_Help()]);
+    } else if (_tab == _Tab.settings) {
+      return ListView(padding: padding, children: [
+        const Text('设置', style: _heading),
+        const SizedBox(height: 18),
+        Material(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(12),
+            clipBehavior: Clip.antiAlias,
+            child: ListTile(
+                leading: const Icon(Icons.tune_rounded, color: _blue),
+                title: const Text('播放设置'),
+                subtitle: const Text('分辨率、帧率、码率与性能统计'),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: controller.phase == SessionPhase.idle
+                    ? controller.openSettings
+                    : null)),
+        if (controller.feedback case final feedback?) _Feedback(feedback),
+      ]);
+    }
+    final nearby = controller.nearby;
+    final missing = controller.unavailable;
+    final filtered = [...nearby, if (_filter == _Filter.all) ...missing];
+    final selected = filtered.where((d) => d.id == _selected).firstOrNull ??
+        filtered.firstOrNull;
+    final list =
+        Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      Row(children: [
+        const Expanded(child: Text('可控设备', style: _heading)),
+        PopupMenuButton<_Filter>(
+            tooltip: '筛选设备',
+            initialValue: _filter,
+            onSelected: (v) => setState(() => _filter = v),
+            itemBuilder: (_) => const [
+                  PopupMenuItem(value: _Filter.all, child: Text('全部设备')),
+                  PopupMenuItem(value: _Filter.online, child: Text('仅在线设备'))
+                ],
+            child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 7),
+                child: DecoratedBox(
+                    decoration: BoxDecoration(
+                        color: _tint, borderRadius: BorderRadius.circular(20)),
+                    child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 5),
+                        child: Row(children: [
+                          const Icon(Icons.devices_rounded, size: 15),
+                          const SizedBox(width: 4),
+                          Text(_filter == _Filter.all ? '全部设备' : '仅在线设备',
+                              style: const TextStyle(fontSize: 13, color: _ink))
+                        ]))))),
+        IconButton(
+            tooltip: '刷新设备',
+            icon: const Icon(Icons.refresh_rounded, size: 21),
+            onPressed: controller.scanning ? null : controller.discover),
+      ]),
+      _Group(
+          label: '在线设备',
+          count: nearby.length,
+          expanded: _showOnline,
+          onTap: () => setState(() => _showOnline = !_showOnline)),
+      if (_showOnline) ...[
+        if (nearby.isEmpty)
+          _Empty(
+              scanning: !controller.scanned || controller.scanning,
+              failure: controller.discoveryError,
+              onHelp: () => setState(() => _tab = _Tab.help)),
+        for (final device in nearby)
+          _DeviceRow(
+              device: device,
+              online: true,
+              opening: controller.activeDevice == device.id,
+              onConnect: controller.phase == SessionPhase.idle
+                  ? () => controller.connect(device)
+                  : null,
+              onDetails: () => _openDetail(device, wide)),
+      ],
+      if (_filter == _Filter.all && missing.isNotEmpty) ...[
+        const SizedBox(height: 12),
+        _Group(
+            label: '此前发现',
+            count: missing.length,
+            expanded: _showMissing,
+            onTap: () => setState(() => _showMissing = !_showMissing)),
+        if (_showMissing)
+          for (final device in missing)
+            _DeviceRow(
+                device: device,
+                online: false,
+                uncertain: controller.discoveryError != null,
+                onDetails: () => _openDetail(device, wide)),
+      ],
+      if (controller.feedback != null && (!wide || selected == null))
+        _Feedback(controller.feedback!),
+    ]);
+    return RefreshIndicator(
+        onRefresh: controller.discover,
+        child: ListView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            padding: padding,
+            children: [
+              if (wide && selected != null)
+                Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Expanded(flex: 5, child: list),
+                  const SizedBox(width: 40),
+                  Expanded(flex: 6, child: _detail(selected))
+                ])
+              else
+                list,
+            ]));
   }
 }
 
-class _DiscoveryState extends StatelessWidget {
-  const _DiscoveryState({required this.scanning, required this.failure});
+class _Group extends StatelessWidget {
+  const _Group(
+      {required this.label,
+      required this.count,
+      required this.expanded,
+      required this.onTap});
+  final String label;
+  final int count;
+  final bool expanded;
+  final VoidCallback onTap;
+  @override
+  Widget build(BuildContext context) => Align(
+      alignment: Alignment.centerLeft,
+      child: TextButton(
+          onPressed: onTap,
+          style: TextButton.styleFrom(
+              foregroundColor: _muted,
+              padding: const EdgeInsets.symmetric(horizontal: 4)),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Text('$label $count'),
+            const SizedBox(width: 3),
+            Icon(expanded ? Icons.keyboard_arrow_up : Icons.keyboard_arrow_down,
+                size: 17)
+          ])));
+}
+
+class _Status extends StatelessWidget {
+  const _Status({required this.online, this.uncertain = false});
+  final bool online, uncertain;
+  @override
+  Widget build(BuildContext context) => DecoratedBox(
+      decoration: BoxDecoration(
+          color: const Color(0xda182433),
+          borderRadius: BorderRadius.circular(20)),
+      child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Icon(Icons.circle,
+                size: 7,
+                color:
+                    online ? const Color(0xff38da64) : const Color(0xffbfc6ce)),
+            const SizedBox(width: 3),
+            Text(
+                online
+                    ? '在线'
+                    : uncertain
+                        ? '待确认'
+                        : '未发现',
+                style: const TextStyle(
+                    color: Colors.white, fontSize: 11, height: 1.2))
+          ])));
+}
+
+class _DeviceRow extends StatelessWidget {
+  const _DeviceRow(
+      {required this.device,
+      required this.online,
+      required this.onDetails,
+      this.opening = false,
+      this.uncertain = false,
+      this.onConnect});
+  final NearbyDevice device;
+  final bool online, opening, uncertain;
+  final VoidCallback? onConnect;
+  final VoidCallback onDetails;
+  @override
+  Widget build(BuildContext context) => Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Material(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(12),
+          clipBehavior: Clip.antiAlias,
+          child: Row(children: [
+            Expanded(
+                child: Semantics(
+                    button: true,
+                    label: online ? '连接 ${device.name}' : '查看 ${device.name}',
+                    child: InkWell(
+                        onTap: online ? onConnect : onDetails,
+                        child: Row(children: [
+                          SizedBox(
+                              width: MediaQuery.sizeOf(context).width < 350
+                                  ? 86
+                                  : 116,
+                              height: 76,
+                              child: Stack(fit: StackFit.expand, children: [
+                                DeviceCover(available: online),
+                                Positioned(
+                                    left: 5,
+                                    top: 5,
+                                    child: _Status(
+                                        online: online, uncertain: uncertain))
+                              ])),
+                          const SizedBox(width: 14),
+                          Expanded(
+                              child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                Text(device.name,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                        fontSize: 17,
+                                        fontWeight: FontWeight.w500,
+                                        color: online ? _ink : _muted)),
+                                const SizedBox(height: 5),
+                                Row(children: [
+                                  const Icon(Icons.desktop_windows_outlined,
+                                      size: 15, color: _blue),
+                                  const SizedBox(width: 4),
+                                  Expanded(
+                                      child: Text(opening ? '正在连接…' : 'Windows',
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: const TextStyle(
+                                              fontSize: 12, color: _muted)))
+                                ])
+                              ])),
+                        ])))),
+            IconButton(
+                onPressed: onDetails,
+                tooltip: '查看${device.name}详情',
+                icon: const Icon(Icons.chevron_right_rounded,
+                    color: Color(0xff88939d))),
+          ])));
+}
+
+class _Empty extends StatelessWidget {
+  const _Empty(
+      {required this.scanning, required this.failure, required this.onHelp});
   final bool scanning;
   final String? failure;
-
+  final VoidCallback onHelp;
   @override
-  Widget build(BuildContext context) {
-    final title = scanning
-        ? '正在查找电脑…'
-        : failure == null
-            ? '暂未发现电脑'
-            : '无法查找电脑';
-    return Container(
-      padding: const EdgeInsets.symmetric(vertical: 32, horizontal: 22),
-      decoration: BoxDecoration(
-          color: const Color(0xffe7eee6),
-          borderRadius: BorderRadius.circular(22)),
-      child: Column(children: [
-        Container(
-          height: 58,
-          width: 58,
-          decoration: BoxDecoration(
-              color: Colors.white, borderRadius: BorderRadius.circular(18)),
-          child: Icon(
-              failure == null ? Icons.devices_rounded : Icons.wifi_off_rounded,
-              size: 31,
-              color: _green),
-        ),
-        const SizedBox(height: 15),
-        Text(title,
-            textAlign: TextAlign.center,
-            style: const TextStyle(
-                color: _ink, fontSize: 20, fontWeight: FontWeight.w700)),
-        const SizedBox(height: 7),
-        Text(
-            failure ??
-                (scanning
-                    ? '正在等待局域网中的电脑回应。'
-                    : '请在电脑上打开 FlashLink，并确认两台设备连到同一个网络。'),
-            textAlign: TextAlign.center,
-            style: const TextStyle(color: _muted, height: 1.5)),
-      ]),
-    );
-  }
+  Widget build(BuildContext context) => Card.filled(
+      margin: EdgeInsets.zero,
+      color: Colors.white,
+      child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 26),
+          child: Column(children: [
+            const Icon(Icons.devices_rounded, color: _blue, size: 42),
+            const SizedBox(height: 12),
+            Text(
+                scanning
+                    ? '正在查找电脑…'
+                    : failure != null
+                        ? '无法查找电脑'
+                        : '暂未发现电脑',
+                style: const TextStyle(
+                    color: _ink, fontSize: 18, fontWeight: FontWeight.w600)),
+            const SizedBox(height: 6),
+            Text(failure ?? '在电脑上打开 FlashLink，并让两端连接同一局域网。',
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: _muted, height: 1.5)),
+            TextButton(onPressed: onHelp, child: const Text('首次连接')),
+          ])));
 }
 
-class _ConnectionGuide extends StatelessWidget {
-  const _ConnectionGuide();
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(21),
-      decoration: BoxDecoration(
-          color: Colors.white,
-          border: Border.all(color: _line),
-          borderRadius: BorderRadius.circular(20)),
-      child:
-          const Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text('首次连接',
-            style: TextStyle(
-                fontSize: 18, fontWeight: FontWeight.w700, color: _ink)),
-        SizedBox(height: 17),
-        _GuideItem(
-            icon: Icons.power_settings_new_rounded,
-            heading: '在电脑上打开 FlashLink',
-            detail: '确保 Windows 已登录并解锁。'),
-        SizedBox(height: 16),
-        _GuideItem(
-            icon: Icons.pin_outlined,
-            heading: '在电脑上确认配对',
-            detail: '核对两端显示的完整配对码，确认一致后在电脑上点「允许」。'),
-      ]),
-    );
-  }
-}
-
-class _GuideItem extends StatelessWidget {
-  const _GuideItem(
-      {required this.icon, required this.heading, required this.detail});
-  final IconData icon;
-  final String heading;
-  final String detail;
-
+class _Help extends StatelessWidget {
+  const _Help();
   @override
   Widget build(BuildContext context) =>
-      Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Icon(icon, size: 20, color: _green),
-        const SizedBox(width: 10),
-        Expanded(
-            child:
-                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(heading,
-              style: const TextStyle(
-                  fontWeight: FontWeight.w600, height: 1.4, color: _ink)),
-          const SizedBox(height: 3),
-          Text(detail,
-              style: const TextStyle(height: 1.5, fontSize: 13, color: _muted)),
-        ])),
+      Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        const Text('连接帮助', style: _heading),
+        const SizedBox(height: 18),
+        Material(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(12),
+            clipBehavior: Clip.antiAlias,
+            child: const Column(children: [
+              ListTile(
+                  leading: Icon(Icons.desktop_windows_rounded, color: _blue),
+                  title: Text('首次连接'),
+                  subtitle: Text('在已解锁的 Windows 电脑上打开 FlashLink，等待主机显示已就绪。')),
+              Divider(height: 1, indent: 56),
+              ListTile(
+                  leading: Icon(Icons.wifi_rounded, color: _blue),
+                  title: Text('在局域网中发现电脑'),
+                  subtitle: Text('手机和平板连接同一网络，电脑也可以使用网线。在“我的设备”下拉刷新，然后点设备名称。')),
+              Divider(height: 1, indent: 56),
+              ListTile(
+                  leading: Icon(Icons.verified_user_outlined, color: _blue),
+                  title: Text('核对配对码'),
+                  subtitle: Text('首次连接时核对两端的完整确认码，在电脑上点“允许连接”。之后点同一设备即可进入桌面。')),
+            ]))
       ]);
+}
+
+class _Feedback extends StatelessWidget {
+  const _Feedback(this.message);
+  final String message;
+  @override
+  Widget build(BuildContext context) => Padding(
+      padding: const EdgeInsets.symmetric(vertical: 12),
+      child: Semantics(
+          liveRegion: true,
+          child: Text(message,
+              style: TextStyle(color: Theme.of(context).colorScheme.error))));
 }

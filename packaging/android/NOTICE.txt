@@ -6,7 +6,8 @@ https://github.com/moonlight-stream/moonlight-common-c/tree/8af4562af672dd6b9ed2
 
 FlashLink modifications, 2026-11-23: use a separate application ID and Flutter launcher,
 open the host selected in FlashLink, request encrypted streams, and package the Rust
-manager in the Android arm64 build. Modified native files retain their upstream license.
+manager in the Android arm64 build. The FlashLink session shell adds trusted-device
+reconnection, in-stream touch controls and aggregate performance measurements. Modified native files retain their upstream license.
 This integration is built by scripts/android_demo.py and packaging/android/moonlight-v12.1.patch.
 Distributors of the combined APK should provide the complete corresponding source
 and build scripts for the exact binary with the distribution.

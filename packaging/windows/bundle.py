@@ -12,6 +12,12 @@ import zipfile
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 HERE = pathlib.Path(__file__).resolve().parent
 DIGEST = "233008e46f4c0e501a586cbfd6c4fd4a4c0d414a0b5fc7f13c070eb92ec3824b"
+VDD_DIGESTS = {
+    "MttVDD.inf": "550d211fe481e74dfe3f9d724ed78be48b3a9113405965d683d9373e8d672f5d",
+    "MttVDD.dll": "c9ca837f57a98fbd43bc416a7f535a95843626e7759eaf85cf0cd7ce334dbb05",
+    "mttvdd.cat": "08a0093fc9b2e32b287a6f8a77ca4de0a31830d29fc33d2b13a918dc859468f6",
+    "vdd_settings.xml": "edb2501d6d5da17f66d15d4b97a6f4a3f0d8963165ac4a6a6259d95118288020",
+}
 
 
 def main():
@@ -24,6 +30,9 @@ def main():
     parser.add_argument("--llvm-mingw", type=pathlib.Path)
     parser.add_argument("--output", type=pathlib.Path, default=ROOT/"dist"/"FlashLink-Windows-x64.zip")
     args = parser.parse_args()
+    for name, digest in VDD_DIGESTS.items():
+        if hashlib.sha256((HERE / "mttvdd" / name).read_bytes()).hexdigest() != digest:
+            parser.error(f"Virtual display component {name} differs from release 25.7.23")
     original = args.sunshine_zip.read_bytes()
     if hashlib.sha256(original).hexdigest() != DIGEST:
         parser.error("Sunshine ZIP digest differs from the pinned upstream release")
@@ -41,6 +50,7 @@ def main():
             out.write(ROOT/"LICENSE", "LICENSE")
             out.write(HERE/"NOTICE.txt", "NOTICE.txt")
             out.writestr("使用说明.txt", (HERE/"使用说明.txt").read_text().replace("\n", "\r\n").encode("utf-8-sig"))
+            out.write(HERE/"mttvdd/LICENSE", "licenses/MttVDD-LICENSE")
             out.write(args.sunshine_license, "licenses/Sunshine-LICENSE")
             with zipfile.ZipFile(io.BytesIO(original)) as engine:
                 for item in engine.infolist():

@@ -109,8 +109,8 @@ void main() {
       await tester.pumpAndSettle();
       expect(player.scans, 1);
       expect(find.byType(TextField), findsNothing);
-      expect(find.text('首次连接'), findsOneWidget);
-      await tester.tap(find.text('书房电脑'));
+      expect(find.text('在线设备 1'), findsOneWidget);
+      await tester.tap(find.text('书房电脑').first);
       await tester.pump();
       expect(core.requested, device.host);
       expect(
@@ -125,6 +125,8 @@ void main() {
       await tester.pumpAndSettle();
       expect(core.events, [PlayerEvent.opened, PlayerEvent.returned]);
       expect(controller.phase, SessionPhase.idle);
+      await tester.tap(find.text('设置'));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('播放设置'));
       expect(player.settingsCount, 1);
       expect(tester.takeException(), isNull);
@@ -149,7 +151,40 @@ void main() {
     player.devices = [device];
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
     await tester.pumpAndSettle();
-    expect(find.text('书房电脑'), findsOneWidget);
+    expect(find.text('书房电脑'), findsWidgets);
     expect(player.scans, 3);
+  });
+  testWidgets('device details follow a lost host and filter hides missing rows',
+      (tester) async {
+    tester.view.physicalSize = const Size(375, 760);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final player = FakePlayer();
+    final controller = ConnectionController(FakeCore.new, player);
+    addTearDown(controller.dispose);
+    await tester.pumpWidget(FlashLinkApp(controller: controller));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('查看书房电脑详情'));
+    await tester.pumpAndSettle();
+    expect(find.text('进入桌面'), findsOneWidget);
+    player.devices = [];
+    await controller.discover();
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('设备不可用'));
+    expect(player.launched, isEmpty);
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    expect(find.text('此前发现 1'), findsOneWidget);
+    await tester.tap(find.byTooltip('筛选设备'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('仅在线设备'));
+    await tester.pumpAndSettle();
+    expect(find.text('此前发现 1'), findsNothing);
+    expect(find.text('暂未发现电脑'), findsOneWidget);
+    await tester.tap(find.text('首次连接'));
+    await tester.pumpAndSettle();
+    expect(find.text('核对配对码'), findsOneWidget);
+    expect(tester.takeException(), isNull);
   });
 }

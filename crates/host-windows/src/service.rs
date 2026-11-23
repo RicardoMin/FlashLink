@@ -2,6 +2,7 @@ use super::{
     check_ports, check_recovery_files, default_executable,
     lan::Nearby,
     management::{Api, Credentials},
+    privacy_time::{desktop_state, Desktop},
     profile::Profile,
     ready,
     windows_job::KillOnClose,
@@ -11,13 +12,16 @@ use std::{
     env, fs,
     net::UdpSocket,
     os::windows::process::CommandExt,
-    path::PathBuf,
-    process::{Command, Stdio},
+    path::{Path, PathBuf},
+    process::{Child, Command, Stdio},
     sync::mpsc::{Receiver, RecvTimeoutError, Sender},
     time::{Duration, Instant},
 };
 
 pub enum Event {
+    Paused(Desktop),
+    Privacy(String),
+    Devices(Result<Vec<super::management::PairedDevice>, String>),
     Status(String),
     Online {
         base: u16,
@@ -34,6 +38,9 @@ pub enum Event {
     Failed(String),
 }
 pub enum Action {
+    TogglePrivacy,
+    ListDevices,
+    Revoke(String),
     Answer(String, bool),
     Stop,
 }
@@ -62,12 +69,86 @@ pub fn serve(
             .or_else(default_executable)
             .ok_or("未找到 Sunshine。请使用完整的 FlashLink Windows 应用或解压完整便携包。")?
     };
-    let _ = ui.send(Event::Status("正在启动并验证串流引擎…".into()));
+
     let engine = std::path::absolute(engine).map_err(|e| e.to_string())?;
     if !engine.is_file() {
         return Err(format!("找不到串流引擎 {}", engine.display()));
     }
     let dir = std::path::absolute(profile_dir(options)?).map_err(|e| e.to_string())?;
+    loop {
+        if !wait_for_desktop(&dir, ui, commands)? {
+            return Ok(());
+        }
+        let _ = ui.send(Event::Status("正在启动并验证串流引擎…".into()));
+        match run_engine(options, &engine, &dir, ui, commands)? {
+            Exit::Stop => return Ok(()),
+            Exit::DesktopChanged => {}
+        }
+    }
+}
+
+enum Exit {
+    Stop,
+    DesktopChanged,
+}
+
+fn wait_for_desktop(
+    dir: &Path,
+    ui: &Sender<Event>,
+    commands: &Receiver<Action>,
+) -> Result<bool, String> {
+    let mut last = None;
+    let mut recovery: Option<Child> = None;
+    loop {
+        let pending = dir
+            .join(super::privacy::MARKER)
+            .try_exists()
+            .map_err(|e| e.to_string())?;
+        let state = desktop_state(pending, super::privacy::locked());
+        if state == Desktop::Ready {
+            return Ok(true);
+        }
+        if last != Some(state) {
+            let _ = ui.send(Event::Paused(state));
+            last = Some(state);
+        }
+        if pending {
+            if let Some(child) = recovery.as_mut() {
+                if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+                    if !status.success() && dir.join(super::privacy::MARKER).exists() {
+                        return Err("隐私恢复进程意外结束，请在本机检查显示后重新启动。".into());
+                    }
+                    recovery = None;
+                }
+            } else {
+                recovery = super::privacy::recover_if_abandoned(dir)?;
+            }
+        }
+        if matches!(
+            commands.recv_timeout(Duration::from_millis(600)),
+            Ok(Action::Stop) | Err(RecvTimeoutError::Disconnected)
+        ) {
+            return Ok(false);
+        }
+    }
+}
+
+/// Finish tearing down the old instance before reusing its ports and profile on unlock.
+fn pause_engine(child: &mut Child) -> Result<Exit, String> {
+    if child.try_wait().map_err(|e| e.to_string())?.is_none() {
+        child.kill().map_err(|e| e.to_string())?;
+        child.wait().map_err(|e| e.to_string())?;
+    }
+    Ok(Exit::DesktopChanged)
+}
+
+fn run_engine(
+    options: &Options,
+    engine: &Path,
+    dir: &Path,
+    ui: &Sender<Event>,
+    commands: &Receiver<Action>,
+) -> Result<Exit, String> {
     let preferred = options.port.unwrap_or(47989);
     let base = if options.port.is_some() {
         check_ports(preferred)?;
@@ -81,7 +162,7 @@ pub fn serve(
     let engine_dir = engine.parent().ok_or("引擎目录无效")?;
     let program_data = env::var_os("ProgramData").map(PathBuf::from);
     check_recovery_files(engine_dir, program_data.as_deref())?;
-    let mut profile = Profile::prepare(&dir, base)
+    let mut profile = Profile::prepare(dir, base)
         .map_err(|e| format!("无法打开主机配置。请确认 FlashLink 只运行了一次。\r\n{e}"))?;
     let cert = dir.join("flashlink-cert.pem");
     let key = dir.join("flashlink-key.pem");
@@ -98,7 +179,8 @@ pub fn serve(
         .overrides
         .push(format!("credentials_file={}", auth.display()));
     let job = KillOnClose::new().map_err(|e| format!("创建进程管理器失败：{e}"))?;
-    let mut child = Command::new(&engine)
+    profile.remember_stream_log();
+    let mut child = Command::new(engine)
         .current_dir(engine_dir)
         .arg(&profile.config)
         .args(&profile.overrides)
@@ -115,6 +197,9 @@ pub fn serve(
     }
     let deadline = Instant::now() + Duration::from_secs(60);
     let api = loop {
+        if super::privacy::locked() != Some(false) {
+            return pause_engine(&mut child);
+        }
         if let Some(exit) = child.try_wait().map_err(|e| e.to_string())? {
             return Err(format!(
                 "Sunshine 提前退出（{exit}）。\r\n{}",
@@ -125,7 +210,7 @@ pub fn serve(
             commands.recv_timeout(Duration::from_millis(210)),
             Ok(Action::Stop) | Err(RecvTimeoutError::Disconnected)
         ) {
-            return Ok(());
+            return Ok(Exit::Stop);
         }
         if ready(base).unwrap_or(false) {
             // Authenticate against the private TLS certificate and freshly generated manager
@@ -151,21 +236,99 @@ pub fn serve(
     })?;
     let _ = ui.send(Event::Online {
         base,
-        exe: engine,
+        exe: engine.to_owned(),
         address: lan_address().unwrap_or_else(|| "等待局域网连接".into()),
     });
     let mut active: Option<(String, super::lan::Approval, Instant)> = None;
     let mut next_poll = Instant::now();
     let mut failures = 0;
+    let mut guard: Option<super::privacy::Guard> = None;
     loop {
+        if let Some(g) = guard.as_mut() {
+            if let Some(beat) = nearby.heartbeat(&g.owner) {
+                g.beat(beat);
+            }
+            let exited = g.exited();
+            let mut ending = false;
+            for message in g.messages.try_iter() {
+                if matches!(message.as_str(), "LOCKING" | "RESTORED") {
+                    ending = true;
+                }
+                let text = match message.as_str() {
+                    "PRIVATE" => "隐私已开启，只有虚拟屏幕处于活动状态。",
+                    "GRACE" => "连接中断，正在等待原设备重新连接…",
+                    "LOCKING" => "正在锁定 Windows，确认锁定后将恢复显示。",
+                    "RESTORED" => "原显示已恢复，请在电脑解锁。",
+                    msg => msg.strip_prefix("ERROR ").unwrap_or(msg),
+                };
+                let _ = ui.send(Event::Privacy(text.into()));
+            }
+            let pending = dir
+                .join(super::privacy::MARKER)
+                .try_exists()
+                .map_err(|e| e.to_string())?;
+            if ending
+                || (pending && (exited || child.try_wait().map_err(|e| e.to_string())?.is_some()))
+            {
+                let _ = ui.send(Event::Paused(Desktop::Recovering));
+                return pause_engine(&mut child);
+            }
+            if exited {
+                guard = None;
+            }
+        }
         if let Some(exit) = child.try_wait().map_err(|e| e.to_string())? {
+            // The guard marks its own process exit. This also covers the race where the child
+            // exits after try_wait above but before LOCKING arrives on the guard's stdout pipe.
+            if exit.code() == Some(super::privacy::ENGINE_EXIT as i32)
+                || (guard.is_some() && dir.join(super::privacy::MARKER).exists())
+            {
+                let _ = ui.send(Event::Paused(Desktop::Recovering));
+                return Ok(Exit::DesktopChanged);
+            }
             return Err(format!(
                 "串流引擎已退出（{exit}）。\r\n{}",
                 log_note(&profile.log)
             ));
         }
         match commands.recv_timeout(Duration::from_millis(150)) {
-            Ok(Action::Stop) | Err(RecvTimeoutError::Disconnected) => return Ok(()),
+            Ok(Action::TogglePrivacy) => {
+                if let Some(g) = guard.as_mut() {
+                    g.finish();
+                } else {
+                    let result = (|| {
+                        if active.is_some() {
+                            return Err("请先处理待授权请求。".into());
+                        }
+                        let owner = super::lease::sole_owner(dir)?;
+                        let beat = nearby
+                            .heartbeat(&owner)
+                            .filter(|ts| ts.elapsed() < super::privacy_time::STALE)
+                            .ok_or("请先用已配对的最新版安卓 FlashLink 打开桌面，再开启隐私。")?;
+                        super::privacy::Guard::start(dir, child.id(), owner, beat)
+                    })();
+                    match result {
+                        Ok(g) => {
+                            guard = Some(g);
+                            let _ = ui.send(Event::Privacy("正在检查虚拟屏并切换显示…".into()));
+                        }
+                        Err(e) => {
+                            let _ = ui.send(Event::Privacy(e));
+                        }
+                    }
+                }
+            }
+            Ok(Action::ListDevices) => {
+                let _ = ui.send(Event::Devices(api.devices()));
+            }
+            Ok(Action::Revoke(uuid)) => {
+                let status = match api.revoke(&uuid) {
+                    Ok(()) => "已移除设备，下次连接需要重新授权。".into(),
+                    Err(error) => format!("移除设备时出错：{error}"),
+                };
+                let _ = ui.send(Event::Status(status));
+            }
+            Ok(Action::Stop) | Err(RecvTimeoutError::Disconnected) => return Ok(Exit::Stop),
             Ok(Action::Answer(id, allow))
                 if active
                     .as_ref()
@@ -193,6 +356,14 @@ pub fn serve(
             continue;
         }
         next_poll = Instant::now() + Duration::from_millis(650);
+        if super::privacy::locked() != Some(false) {
+            return pause_engine(&mut child);
+        }
+        if let Some(g) = guard.as_mut() {
+            if super::lease::sole_owner(dir).ok() != Some(g.owner) {
+                g.finish();
+            }
+        }
         let pending = match api.pending() {
             Ok(p) => {
                 failures = 0;
@@ -219,6 +390,10 @@ pub fn serve(
         }
         if active.is_none() {
             for p in pending {
+                if guard.is_some() {
+                    let _ = api.respond(&p.id, None);
+                    continue;
+                }
                 if let Some(req) = nearby.take_request(p.address, &p.name) {
                     let _ = ui.send(Event::Ask {
                         id: p.id.clone(),

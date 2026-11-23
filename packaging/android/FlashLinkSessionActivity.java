@@ -8,6 +8,8 @@ import android.opengl.GLSurfaceView;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.SystemClock;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.WindowManager;
 import android.widget.Button;
@@ -35,6 +37,10 @@ public final class FlashLinkSessionActivity extends Activity {
     private GLSurfaceView rendererProbe;
     private final Handler handler = new Handler();
     private boolean resumed;
+    private static final int PLAY_DESKTOP = 71;
+    private final FlashLinkReconnect recovery = new FlashLinkReconnect();
+    private final Runnable recoveryTimeout = this::expireRecovery;
+    private boolean gameOpen;
     private Intent ready;
     private volatile boolean stopped;
     private volatile NvHTTP current;
@@ -59,6 +65,12 @@ public final class FlashLinkSessionActivity extends Activity {
         closeButton.setOnClickListener(v -> finish());
         panel.addView(closeButton);
         setContentView(panel);
+        gameOpen = state != null && state.getBoolean("player");
+        if (gameOpen) return; // Android will deliver the result of the existing child.
+        if (state != null && state.getBoolean("recovering")) {
+            fail("连接已中断，点返回后可重新连接。");
+            return;
+        }
         new Thread(this::connect, "FlashLink Desktop").start();
     }
 
@@ -106,6 +118,16 @@ public final class FlashLinkSessionActivity extends Activity {
             String digest = getIntent().getStringExtra(FlashLinkActivity.ID);
             String host = getIntent().getStringExtra(FlashLinkActivity.HOST);
             int port = getIntent().getIntExtra(FlashLinkActivity.PORT, NvHTTP.DEFAULT_HTTP_PORT);
+            if (recovery.attempts > 1) {
+                for (java.util.Map<String, String> nearby : FlashLinkDiscovery.scan(this)) {
+                    if (digest.equals(nearby.get("id"))) {
+                        java.net.URI updated = FlashLinkActivity.parseAddress(nearby.get("host"));
+                        host = updated.getHost();
+                        port = updated.getPort();
+                        break;
+                    }
+                }
+            }
             ComputerDetails.AddressTuple address = new ComputerDetails.AddressTuple(host, port);
             String uid = new IdentityManager(this).getUniqueId();
             database = new ComputerDatabaseManager(this);
@@ -127,6 +149,9 @@ public final class FlashLinkSessionActivity extends Activity {
                 }
             }
             if (details == null || details.pairState != PairingManager.PairState.PAIRED) {
+                if (recovery.deadline > 0) {
+                    throw new UserVisibleError("此电脑已取消配对。请从设备列表重新连接并授权。");
+                }
                 consent = new FlashLinkConsent(digest);
                 if (stopped) return;
                 handler.postDelayed(timeout, 90000);
@@ -174,8 +199,16 @@ public final class FlashLinkSessionActivity extends Activity {
                 throw new UserVisibleError("电脑正在串流另一个应用，请先结束那次串流。");
             }
             Intent game = ServerHelper.createStartIntent(this, desktop, details, uid);
-            runOnUiThread(() -> { ready = game; openIfResumed(); });
+            game.setClass(this, FlashLinkGame.class);
+            game.putExtra(FlashLinkGame.DEADLINE, recovery.deadline);
+            runOnUiThread(() -> { if (!stopped) { ready = game; openIfResumed(); } });
         } catch (Exception e) {
+            if (stopped) return;
+            if (recovery.deadline > 0 && e instanceof IOException
+                    && !(e instanceof javax.net.ssl.SSLException) && !(e instanceof HostHttpResponseException)) {
+                runOnUiThread(this::scheduleRecovery);
+                return;
+            }
             android.util.Log.w("FlashLink", stage + " · " + e.getClass().getSimpleName());
             String message = e instanceof UserVisibleError ? e.getMessage()
                     : e instanceof javax.net.ssl.SSLException || e instanceof CertificateException
@@ -190,15 +223,73 @@ public final class FlashLinkSessionActivity extends Activity {
 
     private void openIfResumed() {
         if (ready == null || !resumed || stopped || isFinishing()) return;
-        ready.addFlags(Intent.FLAG_ACTIVITY_FORWARD_RESULT);
-        startActivity(ready);
+        if (recovery.deadline > 0 && SystemClock.elapsedRealtime() >= recovery.deadline) {
+            expireRecovery();
+            return;
+        }
+        handler.removeCallbacks(recoveryTimeout);
+        gameOpen = true;
+        startActivityForResult(ready, PLAY_DESKTOP);
         ready = null;
-        finish();
+    }
+
+    @Override protected void onActivityResult(int request, int result, Intent data) {
+        super.onActivityResult(request, result, data);
+        if (request != PLAY_DESKTOP) return;
+        gameOpen = false;
+        if (result == FlashLinkGame.EXPIRED) {
+            expireRecovery();
+        } else if (result == FlashLinkGame.NETWORK_LOST && data != null) {
+            long deadline = data.getLongExtra(FlashLinkGame.DEADLINE, 0);
+            if (recovery.deadline != deadline) recovery.interrupted(SystemClock.elapsedRealtime(), deadline);
+            scheduleRecovery();
+        } else {
+            finish();
+        }
+    }
+
+    private void scheduleRecovery() {
+        if (stopped || isFinishing()) return;
+        long now = SystemClock.elapsedRealtime();
+        long delay = recovery.nextDelay(now);
+        if (now >= recovery.deadline) {
+            expireRecovery();
+            return;
+        }
+        pinText.setText("");
+        status.setText("连接中断，正在尝试重连…");
+        closeButton.setText("取消重连");
+        handler.removeCallbacks(recoveryTimeout);
+        handler.postDelayed(recoveryTimeout, recovery.deadline - now);
+        if (delay < 0) return;
+        handler.postDelayed(() -> {
+            if (stopped || !resumed) return;
+            recovery.attempts++;
+            Log.i(FlashLinkGame.LOG, "RETRY_ATTEMPT");
+            new Thread(this::connect, "FlashLink reconnect").start();
+        }, delay);
+    }
+
+    private void expireRecovery() {
+        if (stopped || isFinishing()) return;
+        Log.i(FlashLinkGame.LOG, "RETRY_EXHAUSTED");
+        fail("自动重连已超时，请确认电脑和 Wi-Fi 状态后重新连接。");
+    }
+
+    @Override protected void onSaveInstanceState(Bundle state) {
+        state.putBoolean("player", gameOpen);
+        state.putBoolean("recovering", recovery.deadline > 0);
+        super.onSaveInstanceState(state);
+    }
+
+    @Override protected void onStop() {
+        if (!gameOpen && recovery.deadline > 0 && !isFinishing()) finish();
+        super.onStop();
     }
 
     private void stopWork() {
         stopped = true;
-        handler.removeCallbacks(timeout);
+        handler.removeCallbacksAndMessages(null);
         FlashLinkConsent pending = consent;
         if (pending != null) pending.close();
         NvHTTP http = current;

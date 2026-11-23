@@ -164,11 +164,14 @@ impl Write for DeadlineSocket {
     }
 }
 
+type LastBeat = Arc<Mutex<Option<([u8; 32], Instant)>>>;
+
 fn receive(
     stream: TcpStream,
     tls: Arc<ServerConfig>,
     inbox: &Mutex<Inbox>,
     host_code: &str,
+    last_beat: &LastBeat,
 ) -> io::Result<()> {
     let peer = stream.peer_addr()?.ip();
     let socket = DeadlineSocket::new(stream, Duration::from_secs(5))?;
@@ -176,13 +179,27 @@ fn receive(
     let mut encrypted = StreamOwned::new(conn, socket);
     let mut line = Vec::new();
     BufReader::new((&mut encrypted).take(512)).read_until(b'\n', &mut line)?;
-    let accepted = parse_pair(&line, peer, host_code)
-        .is_some_and(|p| inbox.lock().is_ok_and(|mut q| q.store(p)));
+    let accepted = if line == b"FLASHLINK_STREAM/1\n" {
+        encrypted
+            .conn
+            .peer_certificates()
+            .and_then(|c| c.first())
+            .is_some_and(|cert| {
+                last_beat.lock().is_ok_and(|mut beat| {
+                    *beat = Some((Sha256::digest(cert.as_ref()).into(), Instant::now()));
+                    true
+                })
+            })
+    } else {
+        parse_pair(&line, peer, host_code)
+            .is_some_and(|p| inbox.lock().is_ok_and(|mut q| q.store(p)))
+    };
     encrypted.write_all(if accepted { b"OK\n" } else { b"NO\n" })?;
     encrypted.flush()
 }
 
 pub struct Nearby {
+    last_beat: LastBeat,
     inbox: Arc<Mutex<Inbox>>,
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
@@ -208,12 +225,17 @@ impl Nearby {
         let prefix = fingerprint[..12].to_ascii_uppercase();
         let host_code = format!("{} {} {}", &prefix[..4], &prefix[4..8], &prefix[8..12]);
         let key = PrivateKeyDer::from_pem_file(key_path).map_err(io::Error::other)?;
-        let tls = Arc::new(
-            ServerConfig::builder()
-                .with_no_client_auth()
-                .with_single_cert(vec![cert], key)
-                .map_err(io::Error::other)?,
-        );
+        let mut config = ServerConfig::builder()
+            .with_client_cert_verifier(Arc::new(super::lease::PairedClients(
+                cert_path.with_file_name("flashlink-state.json"),
+            )))
+            .with_single_cert(vec![cert], key)
+            .map_err(io::Error::other)?;
+        config.send_tls13_tickets = 0;
+        config.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
+        let tls = Arc::new(config);
+        let last_beat: LastBeat = Arc::default();
+        let beats = last_beat.clone();
         let udp = UdpSocket::bind((bind_address, DISCOVERY_PORT))
             .map_err(|e| io::Error::new(e.kind(), format!("设备发现 UDP {DISCOVERY_PORT}: {e}")))?;
         udp.set_read_timeout(Some(POLL))?;
@@ -259,10 +281,11 @@ impl Nearby {
                         active.fetch_add(1, Ordering::AcqRel);
                         let (tls, queue, count) = (tls.clone(), queue.clone(), active.clone());
                         let host_code = host_code.clone();
+                        let beat = beats.clone();
                         if thread::Builder::new()
                             .name("FlashLink pairing".into())
                             .spawn(move || {
-                                let _ = receive(stream, tls, &queue, &host_code);
+                                let _ = receive(stream, tls, &queue, &host_code, &beat);
                                 count.fetch_sub(1, Ordering::AcqRel);
                             })
                             .is_err()
@@ -273,10 +296,20 @@ impl Nearby {
                 }
             })?;
         Ok(Self {
+            last_beat,
             inbox,
             stop,
             worker: Some(worker),
         })
+    }
+
+    pub fn heartbeat(&self, owner: &[u8; 32]) -> Option<Instant> {
+        self.last_beat
+            .lock()
+            .ok()?
+            .as_ref()
+            .filter(|(id, _)| id == owner)
+            .map(|(_, ts)| *ts)
     }
 
     pub fn take_request(&mut self, source_ip: IpAddr, pairing_name: &str) -> Option<Approval> {
