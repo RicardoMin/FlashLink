@@ -1,0 +1,20 @@
+[package]
+name = "flashlink-host"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+publish = false
+
+[dependencies]
+if-addrs = "0.14"
+base64 = "0.22.1"
+getrandom = "0.3.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10.9"
+rustls = { version = "0.23.35", default-features = false, features = ["std", "ring", "tls12"] }
+
+[target.'cfg(windows)'.dependencies]
+native-tls = "0.2.15"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_System_Com", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse"] }
+
