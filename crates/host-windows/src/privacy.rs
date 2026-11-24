@@ -123,6 +123,7 @@ fn restore(dir: &Path, journal: &Journal, original: Option<&Topology>) -> Result
     record(dir, "locking");
     let mut saw_lock = false;
     let mut reported = false;
+    let mut logged_manual = false;
     loop {
         let state = locked();
         let manual = state == Some(false)
@@ -136,13 +137,20 @@ fn restore(dir: &Path, journal: &Journal, original: Option<&Topology>) -> Result
             // A changed cable or monitor may make the exact in-memory snapshot inapplicable.
             // Validate what Windows actually did. An explicit local recovery can accept the
             // current saved physical outputs after a cable change.
-            let _ = original.map(Topology::restore);
+            let log_dir = (!reported || (manual && !logged_manual)).then_some(dir);
+            if manual {
+                logged_manual = true;
+            }
+            let _ = original.map(|topo| topo.restore(log_dir));
             if !journal.restored() {
-                let _ = privacy_display::restore_database();
+                let _ = privacy_display::restore_database(log_dir);
             }
             if journal.restored()
                 || (manual && Topology::active().is_ok_and(|s| s.has_physical_output()))
             {
+                if reported {
+                    privacy_display::log_restore_recovered(dir, manual);
+                }
                 return journal.clear(dir);
             }
             if !reported {
@@ -213,7 +221,7 @@ pub fn run(dir: &Path, engine: Option<u32>) -> Result<(), String> {
         transaction: id.iter().map(|b| format!("{b:02x}")).collect(),
         targets: original.targets()?,
     };
-    let plan = Topology::virtual_only_plan()?;
+    let mut plan = Topology::virtual_only_plan(dir, &original)?;
     let (tx, rx) = mpsc::sync_channel(4);
     thread::spawn(move || {
         for line in io::stdin().lock().lines() {
@@ -242,7 +250,7 @@ pub fn run(dir: &Path, engine: Option<u32>) -> Result<(), String> {
         return Err("连接中断，请重新连接后开启隐私。".into());
     }
     journal.save(dir)?;
-    if let Err(e) = plan.activate() {
+    if let Err(e) = plan.activate(dir) {
         // SetDisplayConfig can fail after a topology change. Only unlock recovery bookkeeping
         // without locking when we can positively verify that our original paths never changed.
         if journal.restored() {
@@ -294,6 +302,8 @@ pub fn run(dir: &Path, engine: Option<u32>) -> Result<(), String> {
                 last = state;
             }
         }
+    } else {
+        plan.log_active_mismatch(dir);
     }
     stop_engine(&engine);
     report("LOCKING");

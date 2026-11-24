@@ -260,6 +260,20 @@ def privacy_events(log):
     return events
 
 
+def privacy_display_log(log):
+    if not log:
+        return []
+    path = log.with_name("privacy-display.log")
+    if not path.is_file():
+        return []
+    with path.open("rb") as file:
+        size = file.seek(0, os.SEEK_END)
+        file.seek(max(0, size - 32768))
+        lines = file.read().decode("ascii", errors="replace").splitlines()[-256:]
+    pattern = re.compile(r"^\d{1,12}\s+phase=[a-z_]+(?:\s+[a-z_]+=[-0-9a-zA-Z_,/:]+)+$")
+    return [line for line in lines if pattern.fullmatch(line)]
+
+
 def field(args):
     path = args.host_log
     if path is None and os.name == "nt" and os.environ.get("LOCALAPPDATA"):
@@ -269,9 +283,11 @@ def field(args):
         previous_path = path.with_name("flashlink-sunshine-previous.log") if path and path.name == "flashlink-sunshine.log" else None
         previous = host_sample(previous_path)
         privacy = privacy_events(path)
+        display_log = privacy_display_log(path)
     except OSError as exc:
         host = {"status": "unavailable", "reason": type(exc).__name__}
         privacy = []
+        display_log = []
         previous = {"status": "unavailable", "reason": type(exc).__name__}
     android = {"status": "not_requested"}
     if args.android:
@@ -296,7 +312,7 @@ def field(args):
                     seen[key] = {"y": "passed", "n": "failed", "": "not_tested"}[value]
                     break
     host["platform"] = args.host_platform or ("windows" if os.name == "nt" and args.host_log is None else "unknown")
-    return {"host": host, "previous_stream_log": previous, "privacy_events": privacy, "android": android, "observations": seen}
+    return {"host": host, "previous_stream_log": previous, "privacy_events": privacy, "privacy_display_log": display_log, "android": android, "observations": seen}
 
 
 def main():

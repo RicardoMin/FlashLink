@@ -20,6 +20,9 @@ mod management;
 mod privacy;
 #[cfg(windows)]
 mod privacy_display;
+#[cfg(any(windows, test))]
+#[cfg_attr(not(windows), allow(dead_code))]
+mod privacy_display_plan;
 #[cfg(windows)]
 mod privacy_driver;
 #[cfg(any(windows, test))]

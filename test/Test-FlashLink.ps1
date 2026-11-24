@@ -62,11 +62,21 @@ if (Test-Path -LiteralPath $privacyLog -PathType Leaf) {
         }
     })
 }
+$displayLog = @()
+$privacyDisplayLog = Join-Path $StateDir 'privacy-display.log'
+if (Test-Path -LiteralPath $privacyDisplayLog -PathType Leaf) {
+    $displayLog = @(foreach ($line in Get-Content -LiteralPath $privacyDisplayLog -Tail 256) {
+        if ($line -cmatch '^\d{1,12}\s+phase=[a-z_]+(?:\s+[a-z_]+=[-0-9a-zA-Z_,/:]+)+$') {
+            $line
+        }
+    })
+}
 $report = [ordered]@{
     schema_version = 1; mode = 'windows_host'; created_utc = $now.ToString('o')
     platform = 'Windows'; os_release = [Environment]::OSVersion.Version.ToString()
     graphics = [ordered]@{ status = $gpuStatus; adapters = $video }
     host = $engine; previous_stream_log = $previous; privacy_events = $events
+    privacy_display_log = $displayLog
     physical_screen_observation = 'not_tested'; audible_playback_observation = 'not_tested'
 }
 if ($HostExecutable -and (Test-Path -LiteralPath $HostExecutable -PathType Leaf)) {
