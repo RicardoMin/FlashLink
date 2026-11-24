@@ -371,8 +371,7 @@ fn run_engine(
             if super::lease::sole_owner(dir).ok() != Some(g.owner) {
                 g.finish(dir, "guard_owner_unavailable");
             }
-        } else if Instant::now() >= next_deferred
-            && super::privacy::reconcile_deferred_restore(dir)
+        } else if Instant::now() >= next_deferred && super::privacy::reconcile_deferred_restore(dir)
         {
             next_deferred = Instant::now() + Duration::from_millis(1500);
         }

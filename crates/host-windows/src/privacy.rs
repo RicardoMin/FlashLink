@@ -158,11 +158,15 @@ fn restore(dir: &Path, journal: &Journal, original: Option<&Topology>) -> Result
             }
         }
         if journal.restored() {
-            if reported { privacy_display::log_restore_recovered(dir, manual); }
+            if reported {
+                privacy_display::log_restore_recovered(dir, manual);
+            }
             return journal.clear(dir);
         }
         if manual && Topology::active().is_ok_and(|s| s.has_physical_output()) {
-            if reported { privacy_display::log_restore_recovered(dir, true); }
+            if reported {
+                privacy_display::log_restore_recovered(dir, true);
+            }
             return journal.defer_database_restore(dir);
         }
         if !reported {
@@ -174,7 +178,10 @@ fn restore(dir: &Path, journal: &Journal, original: Option<&Topology>) -> Result
 }
 
 fn restore_while_connected(
-    dir: &Path, journal: &Journal, original: &Topology, icons: &crate::desktop_icons::DesktopIcons,
+    dir: &Path,
+    journal: &Journal,
+    original: &Topology,
+    icons: &crate::desktop_icons::DesktopIcons,
 ) -> Result<bool, String> {
     let deadline = Instant::now() + Duration::from_secs(14);
     // On multi-monitor hosts, hand off through primary-only first so Sunshine drops MttVDD
@@ -312,9 +319,10 @@ pub fn run(dir: &Path, engine: Option<u32>) -> Result<(), String> {
     // Never touch displays if the parent lost its paired stream while preparing this plan.
     let Control::Beat(mut latest) = rx
         .recv_timeout(Duration::from_secs(4))
-        .map_err(|_| "串流已中断，请重新连接。".to_string())? else {
-            return Err("已取消切换".into());
-        };
+        .map_err(|_| "串流已中断，请重新连接。".to_string())?
+    else {
+        return Err("已取消切换".into());
+    };
     loop {
         match rx.try_recv() {
             Ok(Control::Beat(t)) => latest = t,
@@ -596,8 +604,10 @@ pub fn reconcile_deferred_restore(dir: &Path) -> bool {
     }
     // An active layout can be transient. Only retire the journal after a full
     // persistent write succeeds and Windows reports the expected targets.
-    if matches!(privacy_display::restore_targets(Some(dir), &deferred.targets), Ok(true))
-        && deferred.restored()
+    if matches!(
+        privacy_display::restore_targets(Some(dir), &deferred.targets),
+        Ok(true)
+    ) && deferred.restored()
         && fs::remove_file(dir.join(DEFERRED_MARKER)).is_ok()
     {
         record(dir, "deferred_database_restored");
@@ -622,10 +632,8 @@ mod tests {
 
     #[test]
     fn manual_restore_defers_original_set_until_reconnected_and_clears_active_marker() {
-        let dir = std::env::temp_dir().join(format!(
-            "flashlink-deferred-restore-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("flashlink-deferred-restore-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
 
@@ -649,7 +657,11 @@ mod tests {
 
         let events = fs::read_to_string(dir.join("privacy-events.log")).unwrap();
         assert!(events.contains("restored_deferred"));
-        assert!(events.contains("restored\n") || events.ends_with("restored\r\n") || events.ends_with("restored"));
+        assert!(
+            events.contains("restored\n")
+                || events.ends_with("restored\r\n")
+                || events.ends_with("restored")
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -51,10 +51,7 @@ fn append_display_log(dir: &Path, line: &str) {
     }
 }
 
-fn path_log_info(
-    path: &DISPLAYCONFIG_PATH_INFO,
-    modes: &[DISPLAYCONFIG_MODE_INFO],
-) -> PathLogInfo {
+fn path_log_info(path: &DISPLAYCONFIG_PATH_INFO, modes: &[DISPLAYCONFIG_MODE_INFO]) -> PathLogInfo {
     let source_mode_idx = unsafe { path.sourceInfo.Anonymous.modeInfoIdx };
     let target_mode_idx = unsafe { path.targetInfo.Anonymous.modeInfoIdx };
     let source_rect = modes
@@ -184,7 +181,10 @@ impl VirtualPlan {
         };
         if persistence == ApplyPersistence::SaveToDatabase
             && last_code != 5
-            && self.active.apply(log_dir, ApplyPersistence::Transient).is_ok()
+            && self
+                .active
+                .apply(log_dir, ApplyPersistence::Transient)
+                .is_ok()
         {
             return Ok(());
         }
@@ -199,7 +199,9 @@ impl VirtualPlan {
                     Err(code) => {
                         if persistence == ApplyPersistence::SaveToDatabase
                             && code != 5
-                            && candidate.apply(log_dir, ApplyPersistence::Transient).is_ok()
+                            && candidate
+                                .apply(log_dir, ApplyPersistence::Transient)
+                                .is_ok()
                         {
                             self.active = candidate;
                             return Ok(());
@@ -218,7 +220,9 @@ impl VirtualPlan {
     }
 
     fn matches(&self, now: &Topology) -> bool {
-        let [path] = now.paths.as_slice() else { return false };
+        let [path] = now.paths.as_slice() else {
+            return false;
+        };
         let wanted = &self.active.topology.paths[0].targetInfo;
         let actual = &path.targetInfo;
         actual.adapterId.HighPart == wanted.adapterId.HighPart
@@ -259,7 +263,12 @@ impl VirtualPlan {
         false
     }
 
-    pub fn reapply_if_known_displays(&mut self, dir: &Path, original: &Topology, known: &[Target]) -> Result<bool> {
+    pub fn reapply_if_known_displays(
+        &mut self,
+        dir: &Path,
+        original: &Topology,
+        known: &[Target],
+    ) -> Result<bool> {
         let mut now = Topology::active()?;
         // Windows may have finished the transition since the watchdog sampled
         // the mismatch. Another mode set here would restart desktop capture.
@@ -269,7 +278,10 @@ impl VirtualPlan {
         now.paths.retain(|p| !is_mttvdd(p.targetInfo.adapterId));
         if !now.paths.is_empty() {
             let targets = now.targets()?;
-            if !targets.iter().all(|t| known.iter().any(|o| o.identity == t.identity)) {
+            if !targets
+                .iter()
+                .all(|t| known.iter().any(|o| o.identity == t.identity))
+            {
                 return Err("显示器身份已变化".into());
             }
         }
@@ -399,9 +411,10 @@ fn log_available_targets(log_dir: &Path, secs: u64) {
             active,
             status_flags: path.targetInfo.statusFlags,
         };
-        if let Some(existing) = entries.iter_mut().find(|e| {
-            (e.adapter_high, e.adapter_low, e.target_id) == key
-        }) {
+        if let Some(existing) = entries
+            .iter_mut()
+            .find(|e| (e.adapter_high, e.adapter_low, e.target_id) == key)
+        {
             if info.active && !existing.active {
                 *existing = info;
             }
@@ -504,15 +517,21 @@ impl Topology {
         self.paths.iter().find_map(|path| {
             let idx = unsafe { path.sourceInfo.Anonymous.modeInfoIdx } as usize;
             let mode = self.modes.get(idx)?;
-            if mode.infoType != DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE { return None; }
+            if mode.infoType != DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE {
+                return None;
+            }
             let source = unsafe { mode.Anonymous.sourceMode };
-            (source.position.x == 0 && source.position.y == 0 && source.width > 0 && source.height > 0)
+            (source.position.x == 0
+                && source.position.y == 0
+                && source.width > 0
+                && source.height > 0)
                 .then_some((path, source))
         })
     }
 
     fn primary_resolution(&self) -> Option<(u32, u32)> {
-        self.primary_path().map(|(_, source)| (source.width, source.height))
+        self.primary_path()
+            .map(|(_, source)| (source.width, source.height))
     }
 
     pub fn targets(&self) -> Result<Vec<Target>> {
@@ -564,7 +583,8 @@ impl Topology {
     }
 
     pub fn physical_desktop_sizes(&self) -> Vec<(u32, u32)> {
-        self.paths.iter()
+        self.paths
+            .iter()
             .filter(|path| !is_mttvdd(path.targetInfo.adapterId))
             .filter_map(|path| path_log_info(path, &self.modes).source_rect)
             .map(|(_, _, width, height)| (width, height))
@@ -788,12 +808,13 @@ impl Topology {
         );
         if candidates.is_empty() {
             return Err(
-                "未找到已启用的虚拟显示器。请先在电脑上点“安装虚拟屏”，安装后重新连接桌面。"
-                    .into(),
+                "未找到已启用的虚拟显示器。请先在电脑上点“安装虚拟屏”，安装后重新连接桌面。".into(),
             );
         }
 
-        let (primary, desktop) = original.primary_path().ok_or("无法读取当前主屏的桌面分辨率。")?;
+        let (primary, desktop) = original
+            .primary_path()
+            .ok_or("无法读取当前主屏的桌面分辨率。")?;
         let primary_dpi_percent =
             source_dpi_percent(primary.sourceInfo.adapterId, primary.sourceInfo.id);
         let mut attempts = Vec::new();
@@ -818,7 +839,12 @@ impl Topology {
         if last_code == 5 {
             return Err(format_display_error("validate", last_code));
         }
-        Err(format!("无法为虚拟屏校验原主屏的 {}×{} 分辨率。{}。", desktop.width, desktop.height, format_display_error("validate", last_code)))
+        Err(format!(
+            "无法为虚拟屏校验原主屏的 {}×{} 分辨率。{}。",
+            desktop.width,
+            desktop.height,
+            format_display_error("validate", last_code)
+        ))
     }
 }
 
@@ -854,22 +880,33 @@ fn build_attempts_for_candidate(
             let mut preferred = path;
             preferred.targetInfo.refreshRate = rate;
             out.push(PlanAttempt {
-                topology: Topology { paths: vec![preferred], modes: vec![mode] },
+                topology: Topology {
+                    paths: vec![preferred],
+                    modes: vec![mode],
+                },
                 strategy: PlanStrategy::SuppliedSourceOnly,
                 config_flags: SDC_USE_SUPPLIED_DISPLAY_CONFIG,
             });
         }
         out.push(PlanAttempt {
-            topology: Topology { paths: vec![path], modes: vec![mode] },
+            topology: Topology {
+                paths: vec![path],
+                modes: vec![mode],
+            },
             strategy: PlanStrategy::SuppliedSourceOnly,
             config_flags: SDC_USE_SUPPLIED_DISPLAY_CONFIG,
         });
         let target_idx = unsafe { raw.targetInfo.Anonymous.modeInfoIdx } as usize;
-        if let Some(target) = all_modes.get(target_idx)
-            .filter(|m| m.infoType == DISPLAYCONFIG_MODE_INFO_TYPE_TARGET) {
+        if let Some(target) = all_modes
+            .get(target_idx)
+            .filter(|m| m.infoType == DISPLAYCONFIG_MODE_INFO_TYPE_TARGET)
+        {
             path.targetInfo.Anonymous.modeInfoIdx = 1;
             out.push(PlanAttempt {
-                topology: Topology { paths: vec![path], modes: vec![mode, *target] },
+                topology: Topology {
+                    paths: vec![path],
+                    modes: vec![mode, *target],
+                },
                 strategy: PlanStrategy::SuppliedFullModes,
                 config_flags: SDC_USE_SUPPLIED_DISPLAY_CONFIG,
             });
@@ -899,19 +936,27 @@ mod tests {
     fn every_virtual_candidate_preserves_the_original_primary_desktop() {
         // Secondary paths precede the primary, as can happen on docked laptops.
         for (width, height, rotation, multi) in [
-            (1920, 1080, 1, false), (3840, 2160, 1, true),
-            (1600, 2560, 2, true), (5120, 1440, 1, false),
+            (1920, 1080, 1, false),
+            (3840, 2160, 1, true),
+            (1600, 2560, 2, true),
+            (5120, 1440, 1, false),
         ] {
             let mut desktop = DISPLAYCONFIG_SOURCE_MODE::default();
             desktop.width = width;
             desktop.height = height;
             let mut primary = DISPLAYCONFIG_PATH_INFO::default();
             primary.targetInfo.rotation = rotation;
-            primary.targetInfo.refreshRate = DISPLAYCONFIG_RATIONAL { Numerator: 144, Denominator: 1 };
+            primary.targetInfo.refreshRate = DISPLAYCONFIG_RATIONAL {
+                Numerator: 144,
+                Denominator: 1,
+            };
             let mut mode = DISPLAYCONFIG_MODE_INFO::default();
             mode.infoType = DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE;
             mode.Anonymous.sourceMode = desktop;
-            let mut original = Topology { paths: Vec::new(), modes: Vec::new() };
+            let mut original = Topology {
+                paths: Vec::new(),
+                modes: Vec::new(),
+            };
             if multi {
                 let mut other = desktop;
                 other.width = 1920;
@@ -927,17 +972,35 @@ mod tests {
             original.modes.push(mode);
             let (p, src) = original.primary_path().unwrap();
             let mut candidates = Vec::new();
-            build_attempts_for_candidate(DISPLAYCONFIG_PATH_INFO::default(), &[], p, src, &mut candidates);
-            assert_eq!(candidates[0].topology.paths[0].targetInfo.rotation, rotation);
-            assert!(candidates.iter().all(|c| c.topology.primary_resolution() == Some((width, height))));
-            assert!(candidates.iter().any(|c| c.topology.paths[0].targetInfo.refreshRate.Numerator == 0));
+            build_attempts_for_candidate(
+                DISPLAYCONFIG_PATH_INFO::default(),
+                &[],
+                p,
+                src,
+                &mut candidates,
+            );
+            assert_eq!(
+                candidates[0].topology.paths[0].targetInfo.rotation,
+                rotation
+            );
+            assert!(candidates
+                .iter()
+                .all(|c| c.topology.primary_resolution() == Some((width, height))));
+            assert!(candidates.iter().any(|c| c.topology.paths[0]
+                .targetInfo
+                .refreshRate
+                .Numerator
+                == 0));
         }
     }
 
     #[test]
     #[ignore = "interactive hardware exercise; powers physical displays down for 45 seconds"]
     fn exercise_virtual_display_with_hotplug_and_restore() {
-        assert_eq!(std::env::var("FLASHLINK_INTERACTIVE_TEST").as_deref(), Ok("yes"));
+        assert_eq!(
+            std::env::var("FLASHLINK_INTERACTIVE_TEST").as_deref(),
+            Ok("yes")
+        );
         let dir = std::env::temp_dir();
         let original = Topology::active().unwrap();
         let targets = original.targets().unwrap();
@@ -956,7 +1019,8 @@ mod tests {
                     if plan.reapply_if_known_displays(&dir, &original, &targets)? {
                         repair.reapplied(std::time::Instant::now());
                     }
-                    align_at = Some(std::time::Instant::now() + std::time::Duration::from_millis(900));
+                    align_at =
+                        Some(std::time::Instant::now() + std::time::Duration::from_millis(900));
                     println!("reapplied at {:.2}s", start.elapsed().as_secs_f64());
                 } else {
                     repair.verified();
@@ -977,7 +1041,10 @@ mod tests {
             {
                 let _ = restore_database(Some(&dir));
             }
-            if Topology::active().and_then(|s| s.targets()).is_ok_and(|s| s == targets) {
+            if Topology::active()
+                .and_then(|s| s.targets())
+                .is_ok_and(|s| s == targets)
+            {
                 restored = true;
                 icons.finish();
                 break;
@@ -997,7 +1064,10 @@ mod tests {
         // virtual_only_plan uses SDC_VALIDATE. Running this test must not switch displays.
         let selected = plan.active.topology.primary_resolution();
         let rate = plan.active.topology.paths[0].targetInfo.refreshRate;
-        println!("Primary desktop: {primary:?}, validated virtual desktop: {selected:?} refresh={}/{}",rate.Numerator,rate.Denominator);
+        println!(
+            "Primary desktop: {primary:?}, validated virtual desktop: {selected:?} refresh={}/{}",
+            rate.Numerator, rate.Denominator
+        );
         assert_eq!(selected, Some(primary));
     }
 }
@@ -1061,29 +1131,28 @@ fn apply_target_layout(
             selected.sourceInfo.adapterId.LowPart,
             selected.sourceInfo.id,
         );
-        let mode_idx = if let Some(&(_, existing_idx)) =
-            source_mode_by_key.iter().find(|&&(k, _)| k == key)
-        {
-            existing_idx
-        } else {
-            let new_idx = modes.len() as u32;
-            let mut mode = DISPLAYCONFIG_MODE_INFO::default();
-            mode.infoType = DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE;
-            mode.id = selected.sourceInfo.id;
-            mode.adapterId = selected.sourceInfo.adapterId;
-            mode.Anonymous.sourceMode = DISPLAYCONFIG_SOURCE_MODE {
-                width: target.width,
-                height: target.height,
-                pixelFormat: DISPLAYCONFIG_PIXELFORMAT_32BPP,
-                position: windows_sys::Win32::Foundation::POINTL {
-                    x: positions[idx].0,
-                    y: positions[idx].1,
-                },
+        let mode_idx =
+            if let Some(&(_, existing_idx)) = source_mode_by_key.iter().find(|&&(k, _)| k == key) {
+                existing_idx
+            } else {
+                let new_idx = modes.len() as u32;
+                let mut mode = DISPLAYCONFIG_MODE_INFO::default();
+                mode.infoType = DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE;
+                mode.id = selected.sourceInfo.id;
+                mode.adapterId = selected.sourceInfo.adapterId;
+                mode.Anonymous.sourceMode = DISPLAYCONFIG_SOURCE_MODE {
+                    width: target.width,
+                    height: target.height,
+                    pixelFormat: DISPLAYCONFIG_PIXELFORMAT_32BPP,
+                    position: windows_sys::Win32::Foundation::POINTL {
+                        x: positions[idx].0,
+                        y: positions[idx].1,
+                    },
+                };
+                modes.push(mode);
+                source_mode_by_key.push((key, new_idx));
+                new_idx
             };
-            modes.push(mode);
-            source_mode_by_key.push((key, new_idx));
-            new_idx
-        };
         let mut path = normalized_path_without_target_mode(selected, mode_idx);
         path.targetInfo.rotation = normalize_rotation(target.rotation);
         paths.push(path);
@@ -1203,7 +1272,15 @@ pub fn restore_database(log_dir: Option<&Path>) -> Result<()> {
     let flags = SDC_APPLY | SDC_USE_DATABASE_CURRENT;
     let e = unsafe { SetDisplayConfig(0, ptr::null(), 0, ptr::null(), flags) };
     if let Some(dir) = log_dir {
-        log_topology_call(dir, "restore_database", "database_current", flags, e, &[], &[]);
+        log_topology_call(
+            dir,
+            "restore_database",
+            "database_current",
+            flags,
+            e,
+            &[],
+            &[],
+        );
     }
     if e == 0 {
         Ok(())
@@ -1213,7 +1290,10 @@ pub fn restore_database(log_dir: Option<&Path>) -> Result<()> {
 }
 
 pub fn log_repair_error(dir: &Path, reason: &str) {
-    append_display_log(dir, &format!("{} phase=repair_failed detail={reason}", now_secs()));
+    append_display_log(
+        dir,
+        &format!("{} phase=repair_failed detail={reason}", now_secs()),
+    );
 }
 
 pub fn log_restore_recovered(dir: &Path, manual: bool) {
