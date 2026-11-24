@@ -1,7 +1,8 @@
 use super::privacy_display_plan::{
-    candidate_sort_key, format_call_log, format_display_error,
-    format_indexed_path_log, normalize_rotation, normalize_scaling, PathLogInfo, PlanStrategy,
-    MODE_IDX_INVALID,
+    candidate_sort_key, dpi_scale_percent, format_available_target_log, format_call_log,
+    format_display_error, format_indexed_path_log, normalize_origin_positions, normalize_rotation,
+    normalize_scaling, relative_dpi_for_percent, select_distinct_source_paths, ApplyPersistence,
+    AvailableTargetLogInfo, PathLogInfo, PlanStrategy, MODE_IDX_INVALID,
 };
 use std::{
     fs::OpenOptions,
@@ -129,12 +130,16 @@ impl PlanAttempt {
         )
     }
 
-    fn apply(&self, log_dir: &Path) -> std::result::Result<(), i32> {
+    fn apply(&self, log_dir: &Path, persistence: ApplyPersistence) -> std::result::Result<(), i32> {
+        let save = match persistence {
+            ApplyPersistence::SaveToDatabase => SDC_SAVE_TO_DATABASE,
+            ApplyPersistence::Transient => 0,
+        };
         self.topology.apply_config(
             Some(log_dir),
             "apply",
             self.strategy.as_str(),
-            self.config_flags | SDC_APPLY,
+            self.config_flags | SDC_APPLY | save,
         )
     }
 }
@@ -142,24 +147,61 @@ impl PlanAttempt {
 pub struct VirtualPlan {
     active: PlanAttempt,
     fallbacks: Vec<PlanAttempt>,
+    primary_dpi_percent: Option<u32>,
 }
 
 impl VirtualPlan {
     pub fn activate(&mut self, log_dir: &Path) -> Result<()> {
+        // Persist the virtual-only topology for the initial connected monitor set (Set A)
+        // while privacy is active. When a disabled external HDMI/DP monitor enters standby,
+        // drops HPD, and later re-asserts HPD, Windows reloads Set A's database entry instead
+        // of re-enabling the external monitor and restarting its standby/HPD oscillation loop.
+        // Restore always writes the original layout back with SDC_SAVE_TO_DATABASE.
+        self.activate_with_persistence(log_dir, ApplyPersistence::SaveToDatabase)?;
+        self.sync_dpi(log_dir);
+        Ok(())
+    }
+
+    pub fn sync_dpi(&self, log_dir: &Path) {
+        let Some(target_percent) = self.primary_dpi_percent else {
+            return;
+        };
+        let src = &self.active.topology.paths[0].sourceInfo;
+        apply_source_dpi_percent(log_dir, src.adapterId, src.id, target_percent);
+    }
+
+    fn activate_with_persistence(
+        &mut self,
+        log_dir: &Path,
+        persistence: ApplyPersistence,
+    ) -> Result<()> {
         let mut last_phase = "apply";
-        let mut last_code = match self.active.apply(log_dir) {
+        let mut last_code = match self.active.apply(log_dir, persistence) {
             Ok(()) => return Ok(()),
             Err(code) => code,
         };
+        if persistence == ApplyPersistence::SaveToDatabase
+            && last_code != 5
+            && self.active.apply(log_dir, ApplyPersistence::Transient).is_ok()
+        {
+            return Ok(());
+        }
         let remaining = std::mem::take(&mut self.fallbacks);
         for candidate in remaining {
             match candidate.validate(log_dir) {
-                Ok(()) => match candidate.apply(log_dir) {
+                Ok(()) => match candidate.apply(log_dir, persistence) {
                     Ok(()) => {
                         self.active = candidate;
                         return Ok(());
                     }
                     Err(code) => {
+                        if persistence == ApplyPersistence::SaveToDatabase
+                            && code != 5
+                            && candidate.apply(log_dir, ApplyPersistence::Transient).is_ok()
+                        {
+                            self.active = candidate;
+                            return Ok(());
+                        }
                         last_phase = "apply";
                         last_code = code;
                     }
@@ -211,6 +253,7 @@ impl VirtualPlan {
                 );
             }
         }
+        log_available_targets(log_dir, secs);
         false
     }
 
@@ -228,14 +271,148 @@ impl VirtualPlan {
                 return Err("显示器身份已变化".into());
             }
         }
-        if self.active.apply(dir).is_err() {
+        // Reapply transiently (without SDC_SAVE_TO_DATABASE): a sleeping external monitor
+        // drops HPD into a reduced monitor set (Set B), and we must never overwrite Set B's
+        // database entry so unplugging the external monitor later still uses the laptop panel.
+        if self.active.apply(dir, ApplyPersistence::Transient).is_err() {
             // Hotplug can invalidate source and target IDs. Rebuild from current
             // available paths, always using the pre-privacy desktop as the template.
             let mut next = Topology::virtual_only_plan(dir, original)?;
-            next.activate(dir)?;
+            next.activate_with_persistence(dir, ApplyPersistence::Transient)?;
             *self = next;
         }
+        self.sync_dpi(dir);
         Ok(true)
+    }
+}
+
+const DISPLAYCONFIG_DEVICE_INFO_GET_DPI_SCALE: i32 = -3;
+const DISPLAYCONFIG_DEVICE_INFO_SET_DPI_SCALE: i32 = -4;
+
+#[repr(C)]
+struct DisplayConfigSourceDpiScaleGet {
+    header: DISPLAYCONFIG_DEVICE_INFO_HEADER,
+    min_scale_rel: i32,
+    cur_scale_rel: i32,
+    max_scale_rel: i32,
+}
+
+#[repr(C)]
+struct DisplayConfigSourceDpiScaleSet {
+    header: DISPLAYCONFIG_DEVICE_INFO_HEADER,
+    scale_rel: i32,
+}
+
+fn query_source_dpi(adapter: LUID, source_id: u32) -> Option<(i32, i32, i32)> {
+    let mut info = DisplayConfigSourceDpiScaleGet {
+        header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+            r#type: DISPLAYCONFIG_DEVICE_INFO_GET_DPI_SCALE,
+            size: size_of::<DisplayConfigSourceDpiScaleGet>() as u32,
+            adapterId: adapter,
+            id: source_id,
+        },
+        min_scale_rel: 0,
+        cur_scale_rel: 0,
+        max_scale_rel: 0,
+    };
+    let status = unsafe { DisplayConfigGetDeviceInfo(&mut info.header) };
+    (status == 0).then_some((info.min_scale_rel, info.cur_scale_rel, info.max_scale_rel))
+}
+
+fn source_dpi_percent(adapter: LUID, source_id: u32) -> Option<u32> {
+    let (min_rel, cur_rel, _) = query_source_dpi(adapter, source_id)?;
+    dpi_scale_percent(min_rel, cur_rel)
+}
+
+fn apply_source_dpi_percent(log_dir: &Path, adapter: LUID, source_id: u32, target_percent: u32) {
+    let Some((min_rel, cur_rel, max_rel)) = query_source_dpi(adapter, source_id) else {
+        append_display_log(
+            log_dir,
+            &format!(
+                "{} phase=dpi_sync status=query_failed target_pct={target_percent}",
+                now_secs()
+            ),
+        );
+        return;
+    };
+    let cur_pct = dpi_scale_percent(min_rel, cur_rel).unwrap_or(0);
+    let Some(desired_rel) = relative_dpi_for_percent(min_rel, max_rel, target_percent) else {
+        return;
+    };
+    if desired_rel == cur_rel {
+        append_display_log(
+            log_dir,
+            &format!(
+                "{} phase=dpi_sync status=unchanged cur_pct={cur_pct} target_pct={target_percent}",
+                now_secs()
+            ),
+        );
+        return;
+    }
+    let mut set = DisplayConfigSourceDpiScaleSet {
+        header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+            r#type: DISPLAYCONFIG_DEVICE_INFO_SET_DPI_SCALE,
+            size: size_of::<DisplayConfigSourceDpiScaleSet>() as u32,
+            adapterId: adapter,
+            id: source_id,
+        },
+        scale_rel: desired_rel,
+    };
+    let status = unsafe { DisplayConfigSetDeviceInfo(&mut set.header) };
+    append_display_log(
+        log_dir,
+        &format!(
+            "{} phase=dpi_sync status={status} cur_pct={cur_pct} target_pct={target_percent} rel={desired_rel}",
+            now_secs()
+        ),
+    );
+}
+
+fn log_available_targets(log_dir: &Path, secs: u64) {
+    let Ok(all) = Topology::query(QDC_ALL_PATHS) else {
+        append_display_log(
+            log_dir,
+            &format!("{secs} phase=verify_available status=query_failed"),
+        );
+        return;
+    };
+    let mut entries: Vec<AvailableTargetLogInfo> = Vec::new();
+    for path in &all.paths {
+        let active = path.flags & DISPLAYCONFIG_PATH_ACTIVE != 0;
+        let available = path.targetInfo.targetAvailable != 0;
+        if !available && !active {
+            continue;
+        }
+        let key = (
+            path.targetInfo.adapterId.HighPart,
+            path.targetInfo.adapterId.LowPart,
+            path.targetInfo.id,
+        );
+        let info = AvailableTargetLogInfo {
+            adapter_high: key.0,
+            adapter_low: key.1,
+            target_id: key.2,
+            output_technology: path.targetInfo.outputTechnology,
+            target_available: available,
+            active,
+            status_flags: path.targetInfo.statusFlags,
+        };
+        if let Some(existing) = entries.iter_mut().find(|e| {
+            (e.adapter_high, e.adapter_low, e.target_id) == key
+        }) {
+            if info.active && !existing.active {
+                *existing = info;
+            }
+        } else {
+            entries.push(info);
+        }
+    }
+    entries.sort_by_key(|e| (e.adapter_high, e.adapter_low, e.target_id));
+    for (idx, entry) in entries.iter().enumerate() {
+        append_display_log(
+            log_dir,
+            &format_available_target_log(secs, "verify_available", idx, entry),
+        );
     }
 }
 
@@ -337,24 +514,10 @@ impl Topology {
     }
 
     pub fn targets(&self) -> Result<Vec<Target>> {
-        use sha2::{Digest, Sha256};
         let mut displays = Vec::new();
         for path in &self.paths {
-            let mut name = DISPLAYCONFIG_TARGET_DEVICE_NAME::default();
-            name.header.r#type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
-            name.header.size = size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>() as _;
-            name.header.adapterId = path.targetInfo.adapterId;
-            name.header.id = path.targetInfo.id;
-            let e = unsafe { DisplayConfigGetDeviceInfo(&mut name.header) };
-            let count = name
-                .monitorDevicePath
-                .iter()
-                .position(|v| *v == 0)
-                .unwrap_or(name.monitorDevicePath.len());
-            if e != 0 || count == 0 {
-                return Err("无法识别原显示器，未开启隐私。".into());
-            }
-            let raw = String::from_utf16_lossy(&name.monitorDevicePath[..count]).to_lowercase();
+            let identity = target_identity(path)
+                .ok_or_else(|| "无法识别原显示器，未开启隐私。".to_string())?;
             let idx = unsafe { path.sourceInfo.Anonymous.modeInfoIdx } as usize;
             let mode = self
                 .modes
@@ -363,7 +526,7 @@ impl Topology {
                 .ok_or("无法记录原显示模式")?;
             let source = unsafe { mode.Anonymous.sourceMode };
             displays.push(Target {
-                identity: format!("{:x}", Sha256::digest(raw.as_bytes())),
+                identity,
                 x: source.position.x,
                 y: source.position.y,
                 width: source.width,
@@ -386,6 +549,102 @@ impl Topology {
             .collect()
     }
 
+    pub fn path_count(&self) -> usize {
+        self.paths.len()
+    }
+
+    pub fn matches_primary_only(&self, now: &Topology) -> bool {
+        let [actual] = now.paths.as_slice() else {
+            return false;
+        };
+        let Some((wanted, wanted_src)) = self.primary_path() else {
+            return false;
+        };
+        actual.targetInfo.adapterId.HighPart == wanted.targetInfo.adapterId.HighPart
+            && actual.targetInfo.adapterId.LowPart == wanted.targetInfo.adapterId.LowPart
+            && actual.targetInfo.id == wanted.targetInfo.id
+            && now.primary_resolution() == Some((wanted_src.width, wanted_src.height))
+    }
+
+    /// Activate only the pre-privacy primary monitor transiently (without saving to the CCD
+    /// database). Used when exiting privacy on multi-monitor setups so Sunshine drops MttVDD
+    /// (or any transient secondary display) and locks onto the primary display before secondary
+    /// monitors are re-attached.
+    pub fn restore_primary_only(&self, log_dir: Option<&Path>) -> Result<()> {
+        let (primary, source) = self
+            .primary_path()
+            .ok_or_else(|| "无法定位原主屏配置".to_string())?;
+        let mut full_path = *primary;
+        let mut full_modes = Vec::new();
+        let src_old = unsafe { primary.sourceInfo.Anonymous.modeInfoIdx } as usize;
+        if let Some(m) = self
+            .modes
+            .get(src_old)
+            .filter(|m| m.infoType == DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE)
+        {
+            full_path.sourceInfo.Anonymous.modeInfoIdx = full_modes.len() as u32;
+            full_modes.push(*m);
+        } else {
+            full_path.sourceInfo.Anonymous.modeInfoIdx = MODE_IDX_INVALID;
+        }
+        let tgt_old = unsafe { primary.targetInfo.Anonymous.modeInfoIdx } as usize;
+        if let Some(m) = self
+            .modes
+            .get(tgt_old)
+            .filter(|m| m.infoType == DISPLAYCONFIG_MODE_INFO_TYPE_TARGET)
+        {
+            full_path.targetInfo.Anonymous.modeInfoIdx = full_modes.len() as u32;
+            full_modes.push(*m);
+        } else {
+            full_path.targetInfo.Anonymous.modeInfoIdx = MODE_IDX_INVALID;
+        }
+        let full = Self {
+            paths: vec![full_path],
+            modes: full_modes,
+        };
+        if full
+            .apply_config(
+                log_dir,
+                "restore_primary_exact",
+                "primary_only_exact",
+                SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_APPLY,
+            )
+            .is_ok()
+        {
+            return Ok(());
+        }
+        if full
+            .apply_config(
+                log_dir,
+                "restore_primary_allow_changes",
+                "primary_only_allow_changes",
+                SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_APPLY | SDC_ALLOW_CHANGES,
+            )
+            .is_ok()
+        {
+            return Ok(());
+        }
+        let mut source_path = normalized_path_without_target_mode(*primary, 0);
+        source_path.targetInfo.rotation = normalize_rotation(primary.targetInfo.rotation);
+        let mut mode = DISPLAYCONFIG_MODE_INFO::default();
+        mode.infoType = DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE;
+        mode.id = source_path.sourceInfo.id;
+        mode.adapterId = source_path.sourceInfo.adapterId;
+        mode.Anonymous.sourceMode = source;
+        let source_only = Self {
+            paths: vec![source_path],
+            modes: vec![mode],
+        };
+        source_only
+            .apply_config(
+                log_dir,
+                "restore_primary_source_modes",
+                "primary_only_source",
+                SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_APPLY | SDC_ALLOW_CHANGES,
+            )
+            .map_err(|code| format_display_error("restore", code))
+    }
+
     pub fn has_physical_output(&self) -> bool {
         self.paths
             .iter()
@@ -398,7 +657,7 @@ impl Topology {
                 log_dir,
                 "restore_exact",
                 "supplied_exact",
-                SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_APPLY,
+                SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_APPLY | SDC_SAVE_TO_DATABASE,
             )
             .is_ok()
         {
@@ -409,16 +668,19 @@ impl Topology {
                 log_dir,
                 "restore_allow_changes",
                 "supplied_allow_changes",
-                SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_APPLY | SDC_ALLOW_CHANGES,
+                SDC_USE_SUPPLIED_DISPLAY_CONFIG
+                    | SDC_APPLY
+                    | SDC_ALLOW_CHANGES
+                    | SDC_SAVE_TO_DATABASE,
             )
             .is_ok()
         {
             return Ok(());
         }
 
-        // Physical outputs (especially DisplayPort) may renegotiate target timings after
+        // Physical outputs (especially DisplayPort/HDMI) may renegotiate target timings after
         // being disabled. Retain the exact multi-monitor source layout while letting Windows
-        // negotiate fresh target modes.
+        // negotiate fresh target modes, and write the restored layout back to the CCD database.
         let mut source_paths = self.paths.clone();
         let mut source_modes = Vec::new();
         let mut index_map: Vec<(usize, u32)> = Vec::new();
@@ -448,12 +710,30 @@ impl Topology {
             paths: source_paths,
             modes: source_modes,
         };
-        source_only
+        if source_only
             .apply_config(
                 log_dir,
                 "restore_source_modes",
                 "supplied_source_only",
-                SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_APPLY | SDC_ALLOW_CHANGES,
+                SDC_USE_SUPPLIED_DISPLAY_CONFIG
+                    | SDC_APPLY
+                    | SDC_ALLOW_CHANGES
+                    | SDC_SAVE_TO_DATABASE,
+            )
+            .is_ok()
+        {
+            return Ok(());
+        }
+        source_only
+            .apply_config(
+                log_dir,
+                "restore_source_modes_force_enum",
+                "supplied_source_only",
+                SDC_USE_SUPPLIED_DISPLAY_CONFIG
+                    | SDC_APPLY
+                    | SDC_ALLOW_CHANGES
+                    | SDC_SAVE_TO_DATABASE
+                    | SDC_FORCE_MODE_ENUMERATION,
             )
             .map_err(|code| format_display_error("restore", code))
     }
@@ -492,6 +772,8 @@ impl Topology {
         }
 
         let (primary, desktop) = original.primary_path().ok_or("无法读取当前主屏的桌面分辨率。")?;
+        let primary_dpi_percent =
+            source_dpi_percent(primary.sourceInfo.adapterId, primary.sourceInfo.id);
         let mut attempts = Vec::new();
         for raw in candidates {
             build_attempts_for_candidate(raw, &all.modes, primary, desktop, &mut attempts);
@@ -505,6 +787,7 @@ impl Topology {
                     return Ok(VirtualPlan {
                         active: attempt,
                         fallbacks: iter.collect(),
+                        primary_dpi_percent,
                     });
                 }
                 Err(code) => last_code = code,
@@ -665,8 +948,13 @@ mod tests {
             Ok(())
         })();
         let mut restored = false;
-        for _ in 0..24 {
-            if original.restore(Some(&dir)).is_err() { let _ = restore_database(Some(&dir)); }
+        for _ in 0..30 {
+            if original.restore(Some(&dir)).is_err()
+                && restore_targets(Some(&dir), &targets).is_err()
+                && !Topology::active().is_ok_and(|s| s.has_physical_output())
+            {
+                let _ = restore_database(Some(&dir));
+            }
             if Topology::active().and_then(|s| s.targets()).is_ok_and(|s| s == targets) {
                 restored = true;
                 icons.finish();
@@ -692,9 +980,168 @@ mod tests {
     }
 }
 
+fn target_identity(path: &DISPLAYCONFIG_PATH_INFO) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let mut name = DISPLAYCONFIG_TARGET_DEVICE_NAME::default();
+    name.header.r#type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
+    name.header.size = size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>() as _;
+    name.header.adapterId = path.targetInfo.adapterId;
+    name.header.id = path.targetInfo.id;
+    let e = unsafe { DisplayConfigGetDeviceInfo(&mut name.header) };
+    let count = name
+        .monitorDevicePath
+        .iter()
+        .position(|v| *v == 0)
+        .unwrap_or(name.monitorDevicePath.len());
+    if e != 0 || count == 0 {
+        return None;
+    }
+    let raw = String::from_utf16_lossy(&name.monitorDevicePath[..count]).to_lowercase();
+    Some(format!("{:x}", Sha256::digest(raw.as_bytes())))
+}
+
+fn apply_target_layout(
+    log_dir: Option<&Path>,
+    phase: &str,
+    entries: &[(&Target, Vec<DISPLAYCONFIG_PATH_INFO>)],
+    persistence: ApplyPersistence,
+    normalize_origin: bool,
+) -> Result<()> {
+    let candidate_keys: Vec<Vec<(i32, u32, u32)>> = entries
+        .iter()
+        .map(|(_, paths)| {
+            paths
+                .iter()
+                .map(|p| {
+                    (
+                        p.sourceInfo.adapterId.HighPart,
+                        p.sourceInfo.adapterId.LowPart,
+                        p.sourceInfo.id,
+                    )
+                })
+                .collect()
+        })
+        .collect();
+    let chosen = select_distinct_source_paths(&candidate_keys)
+        .ok_or_else(|| "无法为恢复的显示器分配独立源路径".to_string())?;
+    let mut positions: Vec<(i32, i32)> = entries.iter().map(|(t, _)| (t.x, t.y)).collect();
+    if normalize_origin {
+        normalize_origin_positions(&mut positions);
+    }
+    let mut paths = Vec::with_capacity(entries.len());
+    let mut modes = Vec::with_capacity(entries.len());
+    for (idx, ((target, candidates), &choice)) in entries.iter().zip(&chosen).enumerate() {
+        let mut path = normalized_path_without_target_mode(candidates[choice], idx as u32);
+        path.targetInfo.rotation = normalize_rotation(target.rotation);
+        let mut mode = DISPLAYCONFIG_MODE_INFO::default();
+        mode.infoType = DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE;
+        mode.id = path.sourceInfo.id;
+        mode.adapterId = path.sourceInfo.adapterId;
+        mode.Anonymous.sourceMode = DISPLAYCONFIG_SOURCE_MODE {
+            width: target.width,
+            height: target.height,
+            pixelFormat: DISPLAYCONFIG_PIXELFORMAT_32BPP,
+            position: windows_sys::Win32::Foundation::POINTL {
+                x: positions[idx].0,
+                y: positions[idx].1,
+            },
+        };
+        paths.push(path);
+        modes.push(mode);
+    }
+    let save = match persistence {
+        ApplyPersistence::SaveToDatabase => SDC_SAVE_TO_DATABASE,
+        ApplyPersistence::Transient => 0,
+    };
+    let topo = Topology { paths, modes };
+    topo.apply_config(
+        log_dir,
+        phase,
+        "targets_source_only",
+        SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_APPLY | SDC_ALLOW_CHANGES | save,
+    )
+    .map_err(|code| format_display_error("restore", code))
+}
+
+/// Rebuild and apply the pre-privacy display layout directly from persisted target identities
+/// (`QDC_ALL_PATHS`), independent of adapter LUIDs or the CCD database.
+///
+/// Returns `Ok(true)` when all original targets were available and restored (saving back to the
+/// CCD database). When an external monitor is still in standby/HPD-low, wakes any available
+/// physical subset transiently (without modifying Set B's database) and returns `Ok(false)`.
+pub fn restore_targets(log_dir: Option<&Path>, wanted: &[Target]) -> Result<bool> {
+    if wanted.is_empty() {
+        return Err("缺少待恢复的显示器记录".into());
+    }
+    let all = Topology::query(QDC_ALL_PATHS)?;
+    let mut available_by_identity: std::collections::HashMap<String, Vec<DISPLAYCONFIG_PATH_INFO>> =
+        std::collections::HashMap::new();
+    for path in all.paths {
+        if path.targetInfo.targetAvailable == 0 {
+            continue;
+        }
+        if let Some(id) = target_identity(&path) {
+            available_by_identity.entry(id).or_default().push(path);
+        }
+    }
+    for paths in available_by_identity.values_mut() {
+        paths.sort_by_key(|p| {
+            candidate_sort_key(
+                p.flags & DISPLAYCONFIG_PATH_ACTIVE != 0,
+                p.targetInfo.id,
+                p.sourceInfo.id,
+            )
+        });
+    }
+
+    let mut matched: Vec<(&Target, Vec<DISPLAYCONFIG_PATH_INFO>)> = Vec::new();
+    for target in wanted {
+        if let Some(paths) = available_by_identity.get(&target.identity) {
+            matched.push((target, paths.clone()));
+        }
+    }
+    if matched.len() == wanted.len() {
+        apply_target_layout(
+            log_dir,
+            "restore_targets_full",
+            &matched,
+            ApplyPersistence::SaveToDatabase,
+            false,
+        )?;
+        return Ok(true);
+    }
+
+    // External monitor may still be asleep (HPD low). If no physical monitor is active yet,
+    // wake the available physical subset transiently to bring the GPU and sleeping monitor back
+    // without polluting Set B's CCD database entry.
+    if Topology::active().is_ok_and(|s| s.has_physical_output()) {
+        return Ok(false);
+    }
+    let physical: Vec<(&Target, Vec<DISPLAYCONFIG_PATH_INFO>)> = matched
+        .into_iter()
+        .filter_map(|(t, paths)| {
+            let phys: Vec<_> = paths
+                .into_iter()
+                .filter(|p| !is_mttvdd(p.targetInfo.adapterId))
+                .collect();
+            (!phys.is_empty()).then_some((t, phys))
+        })
+        .collect();
+    if !physical.is_empty() {
+        apply_target_layout(
+            log_dir,
+            "restore_targets_wake_physical",
+            &physical,
+            ApplyPersistence::Transient,
+            true,
+        )?;
+    }
+    Ok(false)
+}
+
 pub fn restore_database(log_dir: Option<&Path>) -> Result<()> {
-    // Our temporary configuration deliberately omitted SDC_SAVE_TO_DATABASE. The saved mode is
-    // the fallback when a guard was interrupted before it could reapply its in-memory snapshot.
+    // Fallback when neither the in-memory topology nor persisted target identities could be
+    // reapplied (e.g. a sleeping external monitor left Windows on an untouched reduced set).
     let flags = SDC_APPLY | SDC_USE_DATABASE_CURRENT;
     let e = unsafe { SetDisplayConfig(0, ptr::null(), 0, ptr::null(), flags) };
     if let Some(dir) = log_dir {

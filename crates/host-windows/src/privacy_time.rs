@@ -13,7 +13,7 @@ pub struct DisplayRepair {
 impl DisplayRepair {
     pub fn can_repair(&mut self, now: Instant) -> bool {
         self.writes.retain(|t| now.saturating_duration_since(*t) < Duration::from_secs(30));
-        self.writes.len() < 3
+        self.writes.len() < 4
             && now.duration_since(*self.first_mismatch.get_or_insert(now)) < Duration::from_secs(5)
     }
 
@@ -82,13 +82,13 @@ mod tests {
     fn repeated_mode_sets_end_privacy_even_if_windows_temporarily_recovers() {
         let start = Instant::now();
         let mut repair = DisplayRepair::default();
-        for seconds in [0, 2, 16] {
+        for seconds in [0, 2, 13, 26] {
             let now = start + Duration::from_secs(seconds);
             assert!(repair.can_repair(now));
             repair.reapplied(now);
             repair.verified();
         }
-        assert!(!repair.can_repair(start + Duration::from_secs(19)));
+        assert!(!repair.can_repair(start + Duration::from_secs(29)));
         assert!(repair.can_repair(start + Duration::from_secs(30)));
     }
 

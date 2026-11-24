@@ -78,5 +78,10 @@ impl DesktopIcons {
         if self.requests.send(Some(reply)).is_ok() {
             let _ = done.recv_timeout(Duration::from_secs(3));
         }
+        thread::sleep(Duration::from_millis(600));
+        let (reply2, done2) = mpsc::channel();
+        if self.requests.send(Some(reply2)).is_ok() {
+            let _ = done2.recv_timeout(Duration::from_secs(3));
+        }
     }
 }

@@ -129,6 +129,9 @@ fn restore(dir: &Path, journal: &Journal, original: Option<&Topology>) -> Result
                 let _ = topo.restore(log_dir);
             }
             if !journal.restored() {
+                let _ = privacy_display::restore_targets(log_dir, &journal.targets);
+            }
+            if !journal.restored() && !Topology::active().is_ok_and(|s| s.has_physical_output()) {
                 let _ = privacy_display::restore_database(log_dir);
             }
         }
@@ -147,17 +150,57 @@ fn restore(dir: &Path, journal: &Journal, original: Option<&Topology>) -> Result
 fn restore_while_connected(
     dir: &Path, journal: &Journal, original: &Topology, icons: &crate::desktop_icons::DesktopIcons,
 ) -> Result<bool, String> {
-    let deadline = Instant::now() + Duration::from_secs(6);
-    while Instant::now() < deadline && locked() == Some(false) {
-        if !journal.restored() && original.restore(Some(dir)).is_err() {
-            let _ = privacy_display::restore_database(Some(dir));
+    let deadline = Instant::now() + Duration::from_secs(14);
+    // On multi-monitor hosts, hand off through primary-only first so Sunshine drops MttVDD
+    // (or any transient secondary screen during HDMI wake-up) and locks onto the original
+    // primary display before secondary displays are re-attached.
+    if original.path_count() > 1 {
+        let handoff_deadline = Instant::now() + Duration::from_secs(9);
+        let mut primary_stable_since: Option<Instant> = None;
+        let mut next_write = Instant::now();
+        while Instant::now() < handoff_deadline && locked() == Some(false) {
+            if Topology::active().is_ok_and(|now| original.matches_primary_only(&now)) {
+                let since = *primary_stable_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= Duration::from_millis(1800) {
+                    break;
+                }
+            } else {
+                primary_stable_since = None;
+                if Instant::now() >= next_write {
+                    if original.restore_primary_only(Some(dir)).is_ok() {
+                        // Allow HDMI/DP link training to complete without spamming mode sets.
+                        next_write = Instant::now() + Duration::from_millis(1500);
+                    } else {
+                        let _ = privacy_display::restore_targets(Some(dir), &journal.targets);
+                        next_write = Instant::now() + Duration::from_millis(750);
+                    }
+                }
+            }
+            thread::sleep(Duration::from_millis(250));
         }
+    }
+
+    let mut next_write = Instant::now();
+    while Instant::now() < deadline && locked() == Some(false) {
         if journal.restored() {
+            thread::sleep(Duration::from_millis(500));
             icons.finish();
             journal.clear(dir)?;
             return Ok(true);
         }
-        thread::sleep(Duration::from_millis(350));
+        if Instant::now() >= next_write {
+            if original.restore(Some(dir)).is_ok() {
+                next_write = Instant::now() + Duration::from_millis(1500);
+            } else {
+                let _ = privacy_display::restore_targets(Some(dir), &journal.targets);
+                if !journal.restored() && !Topology::active().is_ok_and(|s| s.has_physical_output())
+                {
+                    let _ = privacy_display::restore_database(Some(dir));
+                }
+                next_write = Instant::now() + Duration::from_millis(750);
+            }
+        }
+        thread::sleep(Duration::from_millis(250));
     }
     Ok(false)
 }
@@ -270,10 +313,14 @@ pub fn run(dir: &Path, engine: Option<u32>) -> Result<(), String> {
         }
         return Err(e);
     }
-    let mut timer = Timer::new(Instant::now());
+    let started = Instant::now();
+    let mut timer = Timer::new(started);
     let mut last = State::Playing;
     let mut repair = super::privacy_time::DisplayRepair::default();
-    let mut align_at = Some(Instant::now() + Duration::from_millis(900));
+    let mut align_passes = [
+        Some(started + Duration::from_millis(900)),
+        Some(started + Duration::from_millis(2200)),
+    ];
     let mut display_failed = true;
     if plan.still_private(dir) {
         display_failed = false;
@@ -281,7 +328,12 @@ pub fn run(dir: &Path, engine: Option<u32>) -> Result<(), String> {
         record(dir, "private");
         report("PRIVATE");
         loop {
-            let received = rx.recv_timeout(Duration::from_millis(250));
+            let poll = if started.elapsed() < Duration::from_secs(35) {
+                Duration::from_millis(100)
+            } else {
+                Duration::from_millis(250)
+            };
+            let received = rx.recv_timeout(poll);
             if matches!(received, Err(mpsc::RecvTimeoutError::Disconnected)) {
                 record(dir, "guard_pipe_closed");
                 break;
@@ -334,12 +386,18 @@ pub fn run(dir: &Path, engine: Option<u32>) -> Result<(), String> {
                         break;
                     }
                 }
-                align_at = Some(Instant::now() + Duration::from_millis(900));
+                let t = Instant::now();
+                align_passes = [
+                    Some(t + Duration::from_millis(900)),
+                    Some(t + Duration::from_millis(2200)),
+                ];
             } else {
                 repair.verified();
-                if align_at.is_some_and(|after| now >= after) {
-                    icons.align();
-                    align_at = None;
+                for slot in &mut align_passes {
+                    if slot.is_some_and(|after| now >= after) {
+                        icons.align();
+                        *slot = None;
+                    }
                 }
             }
             if state == State::Expired {
