@@ -119,13 +119,17 @@ public final class FlashLinkSessionActivity extends Activity {
             String host = getIntent().getStringExtra(FlashLinkActivity.HOST);
             int port = getIntent().getIntExtra(FlashLinkActivity.PORT, NvHTTP.DEFAULT_HTTP_PORT);
             if (recovery.attempts > 1) {
-                for (java.util.Map<String, String> nearby : FlashLinkDiscovery.scan(this)) {
-                    if (digest.equals(nearby.get("id"))) {
-                        java.net.URI updated = FlashLinkActivity.parseAddress(nearby.get("host"));
-                        host = updated.getHost();
-                        port = updated.getPort();
-                        break;
+                try {
+                    for (java.util.Map<String, String> nearby : FlashLinkDiscovery.scan(this)) {
+                        if (digest.equals(nearby.get("id"))) {
+                            java.net.URI updated = FlashLinkActivity.parseAddress(nearby.get("host"));
+                            host = updated.getHost();
+                            port = updated.getPort();
+                            break;
+                        }
                     }
+                } catch (IOException ignored) {
+                    // A failed broadcast should not prevent a direct retry of the paired host.
                 }
             }
             ComputerDetails.AddressTuple address = new ComputerDetails.AddressTuple(host, port);

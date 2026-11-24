@@ -1,4 +1,4 @@
-FlashLink Windows host demo
+FlashLink Windows host
 
 FlashLink host and launcher
   Copyright holders and MIT license: LICENSE

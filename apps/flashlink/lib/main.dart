@@ -61,23 +61,29 @@ class _HomeState extends State<_Home> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _startDiscovery();
+    _updateDiscovery();
   }
 
-  void _startDiscovery() {
+  void _updateDiscovery() {
     _poll?.cancel();
+    final state = WidgetsBinding.instance.lifecycleState;
+    if (_tab != _Tab.devices ||
+        (state != null && state != AppLifecycleState.resumed)) {
+      return;
+    }
     unawaited(controller.discover());
     _poll = Timer.periodic(
         const Duration(seconds: 10), (_) => controller.discover());
   }
 
   @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) {
-      _startDiscovery();
-    } else {
-      _poll?.cancel();
-    }
+  void didChangeAppLifecycleState(AppLifecycleState state) =>
+      _updateDiscovery();
+
+  void _selectTab(_Tab tab) {
+    if (tab == _tab) return;
+    setState(() => _tab = tab);
+    _updateDiscovery();
   }
 
   @override
@@ -86,6 +92,14 @@ class _HomeState extends State<_Home> with WidgetsBindingObserver {
     _poll?.cancel();
     if (widget.controller == null) controller.dispose();
     super.dispose();
+  }
+
+  Future<void> _showResult(Future<String?> result) async {
+    final message = await result;
+    if (message == null || !mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
   }
 
   void _openDetail(NearbyDevice device, bool wide) {
@@ -145,7 +159,7 @@ class _HomeState extends State<_Home> with WidgetsBindingObserver {
                       child: InkWell(
                           onTap: busy || online == null
                               ? null
-                              : () => controller.connect(online),
+                              : () => _showResult(controller.connect(online)),
                           child: Align(
                               alignment: const Alignment(0, .8),
                               child: Row(
@@ -169,7 +183,9 @@ class _HomeState extends State<_Home> with WidgetsBindingObserver {
             Row(children: [
               Expanded(
                   child: TextButton.icon(
-                      onPressed: busy ? null : controller.openSettings,
+                      onPressed: busy
+                          ? null
+                          : () => _showResult(controller.openSettings()),
                       icon: const Icon(Icons.tune_rounded),
                       label: const Text('播放设置'))),
               const SizedBox(height: 18, child: VerticalDivider(width: 1)),
@@ -181,7 +197,6 @@ class _HomeState extends State<_Home> with WidgetsBindingObserver {
                       label: const Text('刷新状态'))),
             ]),
           ])),
-      if (controller.feedback case final feedback?) _Feedback(feedback),
     ]);
   }
 
@@ -202,7 +217,7 @@ class _HomeState extends State<_Home> with WidgetsBindingObserver {
                 selectedItemColor: _blue,
                 unselectedItemColor: _muted,
                 currentIndex: _tab.index,
-                onTap: (i) => setState(() => _tab = _Tab.values[i]),
+                onTap: (i) => _selectTab(_Tab.values[i]),
                 selectedFontSize: 12,
                 unselectedFontSize: 12,
                 items: const [
@@ -249,9 +264,8 @@ class _HomeState extends State<_Home> with WidgetsBindingObserver {
                 subtitle: const Text('分辨率、帧率、码率与性能统计'),
                 trailing: const Icon(Icons.chevron_right),
                 onTap: controller.phase == SessionPhase.idle
-                    ? controller.openSettings
+                    ? () => _showResult(controller.openSettings())
                     : null)),
-        if (controller.feedback case final feedback?) _Feedback(feedback),
       ]);
     }
     final nearby = controller.nearby;
@@ -300,14 +314,14 @@ class _HomeState extends State<_Home> with WidgetsBindingObserver {
           _Empty(
               scanning: !controller.scanned || controller.scanning,
               failure: controller.discoveryError,
-              onHelp: () => setState(() => _tab = _Tab.help)),
+              onHelp: () => _selectTab(_Tab.help)),
         for (final device in nearby)
           _DeviceRow(
               device: device,
               online: true,
               opening: controller.activeDevice == device.id,
               onConnect: controller.phase == SessionPhase.idle
-                  ? () => controller.connect(device)
+                  ? () => _showResult(controller.connect(device))
                   : null,
               onDetails: () => _openDetail(device, wide)),
       ],
@@ -326,8 +340,6 @@ class _HomeState extends State<_Home> with WidgetsBindingObserver {
                 uncertain: controller.discoveryError != null,
                 onDetails: () => _openDetail(device, wide)),
       ],
-      if (controller.feedback != null && (!wide || selected == null))
-        _Feedback(controller.feedback!),
     ]);
     return RefreshIndicator(
         onRefresh: controller.discover,
@@ -533,16 +545,4 @@ class _Help extends StatelessWidget {
                   subtitle: Text('首次连接时核对两端的完整确认码，在电脑上点“允许连接”。之后点同一设备即可进入桌面。')),
             ]))
       ]);
-}
-
-class _Feedback extends StatelessWidget {
-  const _Feedback(this.message);
-  final String message;
-  @override
-  Widget build(BuildContext context) => Padding(
-      padding: const EdgeInsets.symmetric(vertical: 12),
-      child: Semantics(
-          liveRegion: true,
-          child: Text(message,
-              style: TextStyle(color: Theme.of(context).colorScheme.error))));
 }

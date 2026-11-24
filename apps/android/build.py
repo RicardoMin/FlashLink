@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the arm64 FlashLink demo: Flutter AAR + Rust manager + Moonlight native activities."""
+"""Build the arm64 Android app with Flutter, the Rust session manager and Moonlight."""
 
 import argparse
 import hashlib
@@ -14,11 +14,11 @@ import xml.etree.ElementTree as ET
 import zipfile
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ANDROID = Path(__file__).resolve().parent
+ROOT = ANDROID.parents[1]
 PIN = "1b1b100e63e8ffcf1496e324ff7b57ee9f2db2a9"
 ORIGIN = "https://github.com/moonlight-stream/moonlight-android.git"
 MODULE = ROOT / "apps/flashlink"
-OVERLAY = ROOT / "packaging/android"
 RUST_TARGET = "aarch64-linux-android"
 
 
@@ -27,53 +27,35 @@ def run(args, cwd, env=None):
     subprocess.run(list(map(str, args)), cwd=cwd, env=env, check=True)
 
 
-def pinned_checkout(host, origin):
-    if not host.exists():
-        run(["git", "clone", "--depth", "1", "--branch", "v12.1", origin, host], ROOT)
-        (host / ".git/flashlink-generated").touch()
+def check_revision(host):
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=host, text=True).strip()
     if revision != PIN:
         raise ValueError(f"Unexpected Moonlight revision {revision}; expected {PIN}.")
 
 
-def apply_overlay(host, patch):
-    def applicable(*options):
-        result = subprocess.run(["git", "apply", "--check", *options, patch], cwd=host,
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return result.returncode == 0
-
-    if applicable("--reverse"):
-        return True
-    if not applicable():
-        return False
-    run(["git", "apply", patch], host)
-    return True
-
-
 def prepare(output, origin):
-    host = output / "moonlight"
-    marker = output / ".flashlink-android-demo"
+    patch = ANDROID / "moonlight-v12.1.patch"
+    suffix = hashlib.sha256(patch.read_bytes()).hexdigest()[:16]
+    host = output / f"moonlight-{PIN[:8]}-{suffix}"
     output.mkdir(parents=True, exist_ok=True)
-    if host.exists() and not marker.exists():
-        raise ValueError(f"Unmanaged source directory: {host}. Choose another --output.")
-    marker.touch()
-    patch = OVERLAY / "moonlight-v12.1.patch"
-    pinned_checkout(host, origin)
-    if not apply_overlay(host, patch):
-        # A previous version of this demo or a developer's edits may occupy the original checkout.
-        suffix = hashlib.sha256(patch.read_bytes()).hexdigest()[:16]
-        host = output / f"moonlight-{suffix}"
-        if host.exists() and not (host / ".git/flashlink-generated").is_file():
+    if host.exists():
+        if not (host / ".git/flashlink-generated").is_file():
             raise ValueError(f"Unmanaged source directory: {host}. Choose another --output.")
-        pinned_checkout(host, origin)
-        if not apply_overlay(host, patch):
-            raise ValueError(f"Local changes prevent applying the overlay in {host}. Choose another --output.")
-    for adapter in OVERLAY.glob("FlashLink*.java"):
-        shutil.copy2(adapter, host / "app/src/main/java/com/limelight" / adapter.name)
+        check_revision(host)
+        run(["git", "apply", "--check", "--reverse", patch], host)
+    else:
+        # Only publish the build checkout after both the pin and patch have been verified.
+        with tempfile.TemporaryDirectory(dir=output) as tmp:
+            checkout = Path(tmp) / "moonlight"
+            run(["git", "clone", "--depth", "1", "--branch", "v12.1", origin, checkout], ROOT)
+            check_revision(checkout)
+            run(["git", "apply", patch], checkout)
+            (checkout / ".git/flashlink-generated").touch()
+            checkout.rename(host)
     assets = host / "app/src/main/assets/licenses"
     assets.mkdir(parents=True, exist_ok=True)
     shutil.copy2(host / "LICENSE.txt", assets / "Moonlight-GPLv3.txt")
-    shutil.copy2(OVERLAY / "NOTICE.txt", assets / "FlashLink-Moonlight.txt")
+    shutil.copy2(ANDROID / "NOTICE.txt", assets / "FlashLink-Moonlight.txt")
     return host
 
 
@@ -129,13 +111,13 @@ def build(output, host):
     flutter = os.environ.get("FLUTTER_BIN") or shutil.which("flutter")
     if not flutter:
         raise ValueError("Set FLUTTER_BIN to the Flutter 3.38.9 executable or add it to PATH.")
-    run([flutter, "pub", "get"], MODULE)
     run([flutter, "build", "aar", "--no-debug", "--no-profile", "--build-number=1",
          "--target-platform=android-arm64"], MODULE)
     repo = MODULE / "build/host/outputs/repo"
     artifact, aar = flutter_artifact(repo)
     gradle = host / ("gradlew.bat" if os.name == "nt" else "gradlew")
     run([gradle, ":app:assembleNonRootDebug", f"-PflashlinkNdkVersion={version}",
+         f"-PflashlinkJavaSrc={ANDROID / 'src/main/java'}",
          f"-PflashlinkFlutterArtifact={artifact}", f"-PflashlinkFlutterRepo={repo}"], host)
     apk = host / "app/build/outputs/apk/nonRoot/debug/app-nonRoot-debug.apk"
     with zipfile.ZipFile(apk) as package:
@@ -155,7 +137,7 @@ def main():
                         help="Apply and verify integration against the pinned host; skip compilation.")
     parser.add_argument("--upstream", default=ORIGIN,
                         help="Clone source (may be a local Moonlight git mirror containing tag v12.1).")
-    parser.add_argument("--output", type=Path, default=ROOT / "build/android-demo")
+    parser.add_argument("--output", type=Path, default=ROOT / "build/android")
     args = parser.parse_args()
     output = args.output.resolve()
     host = prepare(output, args.upstream)

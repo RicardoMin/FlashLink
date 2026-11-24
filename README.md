@@ -1,97 +1,29 @@
 # FlashLink
 
-**专注局域网高画质、低延迟的开源远程连接工具**
+FlashLink 让安卓手机和平板通过局域网连接 Windows 桌面，适合在平板上看清游戏文字、立绘并听到电脑的声音。Windows 端内置 Sunshine，Android 端集成 Moonlight。1.0 正在开发中。
 
-*用 iPad、平板或手机连接 Windows 电脑 —— 清晰立绘、顺手触控，躺床上愉快推 Galgame。*
+## 开始使用
 
-![Status](https://img.shields.io/badge/Status-WIP-blue)
-![Mode](https://img.shields.io/badge/Mode-LAN%20First-green)
-![Platforms](https://img.shields.io/badge/Platforms-Windows%20%7C%20Android%20%7C%20iPadOS%20%7C%20macOS-orange)
-![License](https://img.shields.io/badge/License-MIT-blue)
+1. 在已登录且已解锁的 Windows 10/11 x64 电脑上运行 `FlashLink-Windows-x64.exe`。
+2. 在 Android 7 或更新版本的 arm64 设备上安装 APK，连到与电脑相同的局域网，打开「我的设备」。
+3. 点选电脑，首次连接时核对两端的确认码，并在 Windows 上允许连接。之后再点同一台电脑即可直连。
 
-**当前试玩版 `0.3.0-demo`** 支持安卓手机或平板在同一局域网内连接 Windows x64。首次授权在电脑上完成，以后点设备卡即可直连。安卓提供游戏内鼠标、键盘及短时重连。Windows 内置虚拟屏组件、隐私模式和本机测试报告导出，物理黑屏与恢复等待真机验收。下文包含后续规划，当前版本的安装步骤和实现见[使用说明](docs/usage.md)和[项目架构](docs/architecture.md)。
+安卓端目前可以通过浮动触控板移动鼠标、点击和滚动，也可以发送按键或文本。直接点按远程坐标、双指缩放与平移分别由 [#6](https://github.com/RicardoMin/FlashLink/issues/6) 和 [#8](https://github.com/RicardoMin/FlashLink/issues/8) 跟踪。
 
-***
+连接故障、隐私模式、诊断报告和两端的构建命令见[使用说明](docs/usage.md)。
 
-## 💡 项目简介
+## 源码
 
-很多人只是想在家里局域网里，拿起手边的 iPad、Android 平板或手机连上自己的 Windows 电脑，躺床上推推 Galgame、玩玩游戏，或者顺手操作桌面。
+| 目录 | 职责 |
+| --- | --- |
+| [apps/flashlink](apps/flashlink) | Flutter 设备列表、主机详情与连接界面 |
+| [apps/android](apps/android) | Android 发现与授权、Moonlight 播放器集成和 APK 构建 |
+| [crates/client](crates/client) | Flutter 通过 FFI 调用的 Rust 会话状态机 |
+| [crates/host-windows](crates/host-windows) | Windows 主机、Sunshine 进程管理、授权、显示恢复和 Windows 分发包 |
+| [test](test) | 本地开发检查与真机诊断报告入口 |
 
-但不少远程工具要么收费，要么使用麻烦操作困难，要么为了省带宽把立绘和文字压糊。
+协议流程、模块边界和代码入口见[项目架构](docs/architecture.md)。已知问题与开发中的功能见 [GitHub Issues](https://github.com/RicardoMin/FlashLink/issues)。
 
-**FlashLink** 专注**局域网优先、画质优先、简单顺手**的远程体验：第一阶段先把 **Windows → 平板 / 手机** 的局域网直连做到极致，后续再逐步拓展到跨局域网连接、更多游戏串流和通用远程桌面。
+## 许可
 
-***
-
-## ✨ 核心特性
-
-### 🎨 原画优先，不偷偷降画质
-
-* **清晰的立绘与文字**：坚持原画优先，保留源画面的分辨率、文字边缘与色彩细节，支持 4:4:4 高清画质与高码率传输。
-* **高帧率低延迟**：支持 60–120 FPS+ 高刷串流，优先调用显卡硬件编解码，流畅省电。
-* **画质档位你说了算**：提供流畅 / 均衡 / 高清 / 原画等直观档位；选定后不会后台静默降画质，网络卡顿时主动提醒并给出调整建议。
-* **游戏音频同步**：将 Windows 游戏声音高质量传到手机或平板，转发时自动静音电脑本地输出，告别两边同时外放。
-
-### 📱 为平板与推 Gal 打磨的触控体验
-
-* **平板优先**：围绕 iPad 与 Android 平板的大屏体验设计，同时适配手机屏幕。
-* **直触主画面**：默认点哪就是哪，支持多指手势与长按，把屏幕空间留给画面本身。
-* **双悬浮球交互**：
-    * 🖱️ **虚拟鼠标球**：随时展开 2D 虚拟鼠标，移动、左/右/中键、滚轮与拖动一站搞定。
-    * ⌨️ **控制面板球**：快速呼出系统虚拟键盘、自定义快捷键面板和常用操作。
-* **躺姿友好**：默认横屏不乱转，支持手动切换横竖屏与横屏 180° 翻转；支持分辨率自适应与手动选择。
-
-### ⚡ 局域网开箱即用
-
-* **免云端直连**：局域网内自动发现设备（也支持手动输入 IP），加密连接；首次在电脑端确认授权后即可记住设备，下次一点即连。
-* **隐私黑屏模式**：手机或平板游玩时一键开启电脑端隐私黑屏，躺床上推 Gal 不怕桌面社死。
-* **轻量省事**：Windows 端默认不开机自启（可按需开启），关闭窗口后驻留系统托盘；提供标准安装版与免安装绿色便携版，支持自动检查更新。
-
-***
-
-## 📋 支持平台
-
-| 平台 | 角色 | 计划阶段 |
-| :--- | :--- | :---: |
-| **Windows** | 被控端（Host）/ 控制端（Client） | V1 优先 |
-| **Android** | 平板 / 手机控制端（平板优先） | V1 优先 |
-| **iPadOS / iOS** | 平板 / 手机控制端（iPad 优先） | V1 优先 |
-| **macOS / Linux** | 被控端（Host） | 后续支持 |
-
-***
-
-## 🗺️ Roadmap
-
-### 当前 · 技术验证与原型
-
-* [x] 完成项目定位与产品规划
-* [ ] 跑通 Windows 采集硬编与移动端原生硬解渲染原型
-* [ ] 验证低延迟局域网传输、音频路由、触控映射与隐私黑屏
-
-### V1 · 局域网高画质体验
-
-* [ ] Windows → Android / iPadOS 端到端音视频串流与触控
-* [ ] 局域网自动发现、手动 IP 连接与设备授权加密
-* [ ] 画质档位、分辨率适配与 60–120 FPS 优化
-* [ ] 直接触摸、多指手势、双悬浮球（2D 虚拟鼠标 + 控制面板）
-* [ ] Windows 托盘后台、隐私黑屏、安装版与绿色便携版
-
-### 后续 · 更完整的远程连接平台
-
-* [ ] 跨局域网连接（P2P 直连 + 中继回退）
-* [ ] 文件传输与剪贴板同步
-* [ ] 虚拟游戏手柄
-* [ ] macOS / Linux 被控端
-* [ ] 账号与设备管理、完整 HDR / 10-bit 优化
-
-***
-
-## 🤝 参与贡献
-
-FlashLink 正在从零搭建中，欢迎对音视频串流、客户端开发或推 Gal 体验有想法的朋友来 [Issues](https://github.com/RicardoMin/FlashLink/issues) 交流，或直接提交 Pull Request 一起共建。
-
-***
-
-## 📄 License
-
-本项目采用 [MIT](LICENSE) 协议开源。
+FlashLink 自有代码采用 [MIT 许可](LICENSE)。Android 集成了 GPLv3 的 Moonlight，Windows 包含独立运行的 Sunshine 和虚拟屏驱动。两端保留各自的第三方声明及对应源码信息。[Android 声明](apps/android/NOTICE.txt) · [Windows 声明](crates/host-windows/assets/NOTICE.txt)

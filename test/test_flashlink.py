@@ -84,7 +84,7 @@ def jdk_tool(name):
     return shutil.which(name)
 
 
-def development(preview_dir=None):
+def development():
     checks = {}
     cargo = shutil.which("cargo")
     flutter = os.environ.get("FLUTTER_BIN") or shutil.which("flutter")
@@ -125,15 +125,13 @@ def development(preview_dir=None):
     target = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))
     native = (ROOT / target / "debug" / libraries.get(platform.system(), "")).resolve()
     flutter_test = [flutter, "test", "--reporter", "expanded"]
-    if preview_dir:
-        flutter_test.append("--dart-define=FLASHLINK_PREVIEW_DIR=" + str(preview_dir.resolve()))
-    if checks["client_ffi_build"]["status"] == "passed" and native.is_file():
+    if checks["client_ffi_build"]["status"] == "passed":
         flutter_test.append("--dart-define=FLASHLINK_TEST_CLIENT_LIBRARY=" + str(native))
     check("flutter_tests", flutter_test, APP)
     with tempfile.TemporaryDirectory() as java_classes:
         check("android_recovery_compile", [jdk_tool("javac"), "-d", java_classes,
-              ROOT / "packaging/android/FlashLinkReconnect.java",
-              ROOT / "test/android/FlashLinkReconnectTest.java"])
+              ROOT / "apps/android/src/main/java/com/limelight/FlashLinkReconnect.java",
+              ROOT / "apps/android/src/test/java/com/limelight/FlashLinkReconnectTest.java"])
         if checks["android_recovery_compile"]["status"] == "passed":
             check("android_recovery_policy", [jdk_tool("java"), "-ea", "-cp", java_classes,
                   "com.limelight.FlashLinkReconnectTest"])
@@ -141,13 +139,19 @@ def development(preview_dir=None):
 
 
 def host_sample(path):
-    if not path or not path.is_file():
-        return {"status": "unavailable", "reason": "host_log_missing"}
     # Read only a bounded log tail. Keep fixed markers, never export lines or device identities.
-    with path.open("rb") as file:
-        size = file.seek(0, os.SEEK_END)
-        file.seek(max(0, size - 2 * 1024 * 1024))
-        lines = file.read().decode("utf-8", "replace").splitlines()
+    try:
+        if path is None or not path.is_file():
+            return {"status": "unavailable", "reason": "host_log_missing"}
+        with path.open("rb") as file:
+            size = file.seek(0, os.SEEK_END)
+            modified = os.fstat(file.fileno()).st_mtime
+            file.seek(max(0, size - 2 * 1024 * 1024))
+            lines = file.read().decode("utf-8", "replace").splitlines()
+    except (FileNotFoundError, IsADirectoryError):
+        return {"status": "unavailable", "reason": "host_log_missing"}
+    except OSError as exc:
+        return {"status": "unavailable", "reason": type(exc).__name__}
     counts = {key: sum(marker in line for line in lines) for key, marker in HOST_MARKERS.items()}
     modes = sorted(set(re.findall(r"Opus initialized: (\d{1,3} kHz, [1-8] channels?)", "\n".join(lines))))
     issues = Counter()
@@ -156,7 +160,7 @@ def host_sample(path):
             category = next((key for key, pattern in ISSUES.items() if re.search(pattern, line, re.I)), "other")
             issues[category] += 1
     return {"status": "collected", "log_tail_truncated": size > 2 * 1024 * 1024,
-            "last_write_utc": datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat(),
+            "last_write_utc": datetime.fromtimestamp(modified, timezone.utc).isoformat(),
             "counts": counts, "opus_modes": modes, "issue_counts_including_startup_probes": issues}
 
 
@@ -264,15 +268,13 @@ def field(args):
     path = args.host_log
     if path is None and os.name == "nt" and os.environ.get("LOCALAPPDATA"):
         path = Path(os.environ["LOCALAPPDATA"]) / "FlashLink/DemoHost/flashlink-sunshine.log"
+    host = host_sample(path)
+    previous_path = path.with_name("flashlink-sunshine-previous.log") if path and path.name == "flashlink-sunshine.log" else None
+    previous = host_sample(previous_path)
     try:
-        host = host_sample(path)
-        previous_path = path.with_name("flashlink-sunshine-previous.log") if path and path.name == "flashlink-sunshine.log" else None
-        previous = host_sample(previous_path)
         privacy = privacy_events(path)
-    except OSError as exc:
-        host = {"status": "unavailable", "reason": type(exc).__name__}
+    except OSError:
         privacy = []
-        previous = {"status": "unavailable", "reason": type(exc).__name__}
     android = {"status": "not_requested"}
     if args.android:
         adb = os.environ.get("ADB") or shutil.which("adb")
@@ -307,27 +309,26 @@ def main():
     cli.add_argument("--android", action="store_true", help="read FlashLink metrics from one USB/ADB device")
     cli.add_argument("--observe", action="store_true", help="record optional physical-device observations")
     cli.add_argument("--output", type=Path, default=ROOT / "testdata")
-    cli.add_argument("--preview", action="store_true", help="also render sample devices and save phone/tablet UI PNGs")
     args = cli.parse_args()
     if args.mode == "dev" and (args.host_log or args.host_platform or args.android or args.observe):
         cli.error("host logs, --android and --observe require --mode field")
-    if args.preview and args.mode != "dev":
-        cli.error("--preview requires --mode dev")
     now = datetime.now(timezone.utc)
     report = {"schema_version": 1, "mode": args.mode, "created_utc": now.isoformat(),
               "platform": platform.system(), "os_release": platform.release(), "arch": platform.machine(),
-              "source": source_version(), "local_package_sha256": binary_identity()}
+              "source": source_version()}
     if args.mode == "dev":
-        results = development(args.output / "ui-preview" if args.preview else None)
+        results = development()
         report["checks"] = results
         states = {item["status"] for item in results.values()}
         code = 1 if "failed" in states else 2 if "skipped" in states else 0
     else:
         results = field(args)
         report.update(results)
+        report["local_package_sha256"] = binary_identity()
         seen = set(results["observations"].values())
         collected = any(results[k]["status"] == "collected" for k in ("host", "previous_stream_log", "android"))
-        incomplete = args.android and results["android"]["status"] != "collected"
+        incomplete = ((args.android and results["android"]["status"] != "collected") or
+                      (args.host_log is not None and results["host"]["status"] != "collected"))
         code = 1 if "failed" in seen else 2 if incomplete or (not collected and "passed" not in seen) else 0
     args.output.mkdir(parents=True, exist_ok=True)
     prefix = f"{args.mode}-{now:%Y%m%dT%H%M%SZ}-"

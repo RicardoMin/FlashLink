@@ -218,26 +218,14 @@ pub fn install() -> io::Result<String> {
         return Ok("虚拟屏已安装。".into());
     }
     const FILES: &[(&str, &[u8])] = &[
-        (
-            "MttVDD.inf",
-            include_bytes!("../../../packaging/windows/mttvdd/MttVDD.inf"),
-        ),
-        (
-            "MttVDD.dll",
-            include_bytes!("../../../packaging/windows/mttvdd/MttVDD.dll"),
-        ),
-        (
-            "mttvdd.cat",
-            include_bytes!("../../../packaging/windows/mttvdd/mttvdd.cat"),
-        ),
+        ("MttVDD.inf", include_bytes!("../assets/mttvdd/MttVDD.inf")),
+        ("MttVDD.dll", include_bytes!("../assets/mttvdd/MttVDD.dll")),
+        ("mttvdd.cat", include_bytes!("../assets/mttvdd/mttvdd.cat")),
         (
             "vdd_settings.xml",
-            include_bytes!("../../../packaging/windows/mttvdd/vdd_settings.xml"),
+            include_bytes!("../assets/mttvdd/vdd_settings.xml"),
         ),
-        (
-            "LICENSE",
-            include_bytes!("../../../packaging/windows/mttvdd/LICENSE"),
-        ),
+        ("LICENSE", include_bytes!("../assets/mttvdd/LICENSE")),
     ];
     for (name, data) in FILES {
         let path = dir.join(name);

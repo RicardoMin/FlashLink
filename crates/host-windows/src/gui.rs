@@ -716,9 +716,9 @@ pub fn window(options: Options) -> Result<(), String> {
 }
 
 fn export_report(directory: &Path) -> Result<String, String> {
-    let script = include_str!("../../../test/Test-FlashLink.ps1");
+    let script = include_str!("../assets/Export-FlashLinkReport.ps1");
     let command = format!(
-        "& {{ {script}\n }} -StateDir $env:FLASHLINK_REPORT_STATE -HostExecutable $env:FLASHLINK_REPORT_EXE -OutputDir (Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'FlashLink/testdata')"
+        "& {{ {script}\n }} -StateDir $env:FLASHLINK_REPORT_STATE -HostExecutable $env:FLASHLINK_REPORT_EXE"
     );
     let root = std::env::var_os("SystemRoot").ok_or("找不到 Windows 系统目录")?;
     let result = std::process::Command::new(
@@ -744,7 +744,7 @@ fn firewall_setup(engine: &Path, base: u16) -> Result<String, String> {
     // Pass paths as quoted PowerShell literals (apostrophes doubled). Only the firewall
     // helper elevates. The GUI and desktop streaming engine retain the user's token.
     let literal = |p: &Path| format!("'{}'", p.to_string_lossy().replace('\'', "''"));
-    let script = include_str!("firewall.ps1")
+    let script = include_str!("../assets/firewall.ps1")
         .replace("__GUI__", &literal(&gui))
         .replace("__ENGINE__", &literal(engine))
         .replace("__BASE__", &base.to_string());
