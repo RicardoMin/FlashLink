@@ -57,7 +57,7 @@ $events = @()
 $privacyLog = Join-Path $StateDir 'privacy-events.log'
 if (Test-Path -LiteralPath $privacyLog -PathType Leaf) {
     $events = @(foreach ($line in Get-Content -LiteralPath $privacyLog -Tail 256) {
-        if ($line -cmatch '^(\d{1,12})\s+(private|lost|resumed|locking|locked|restored|restore_pending)$') {
+        if ($line -cmatch '^(\d{1,12})\s+(private|lost|resumed|locking|locked|restored|restore_pending|display_reapplied|guard_(?:pipe_closed|display_changed|display_timeout|display_without_lease|desktop_unavailable|engine_exited|lease_expired|user_end|owner_unavailable|management_unavailable))$') {
             [ordered]@{ unix_seconds = [long]$Matches[1]; event = $Matches[2] }
         }
     })

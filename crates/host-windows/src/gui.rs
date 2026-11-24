@@ -89,7 +89,10 @@ unsafe extern "system" fn wndproc(w: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             0
         }
         WM_COMMAND => {
-            INPUT.with(|q| q.borrow_mut().push(Input::Button(wp & 0xffff)));
+            // Control notifications share WM_COMMAND with actual button clicks.
+            if lp == 0 || (wp >> 16) == BN_CLICKED as usize {
+                INPUT.with(|q| q.borrow_mut().push(Input::Button(wp & 0xffff)));
+            }
             0
         }
         _ => unsafe { DefWindowProcW(w, msg, wp, lp) },
@@ -509,7 +512,7 @@ pub fn window(options: Options) -> Result<(), String> {
                     visible(consent, false);
                     visible(retry, false);
                     let (heading, explanation)=match state {
-                        Desktop::Recovering=>("正在锁屏并恢复显示","恢复原显示配置并在本机解锁后，主机会自动恢复连接。如果 Windows 暂时拒绝恢复，可在本机解锁后通过“主机 → 本机恢复显示…”确认。"),
+                        Desktop::Recovering=>("正在恢复显示","恢复原显示配置后，主机会在桌面可用时自动上线。如果 Windows 暂时拒绝恢复，可在本机解锁后通过“主机 → 本机恢复显示…”确认。"),
                         Desktop::Locked=>("等待本机解锁","Windows 已锁定。请在电脑上解锁，手机和平板随后即可重新发现并直连。"),
                         Desktop::Unknown=>("正在确认 Windows 桌面状态","确认当前用户的桌面已解锁后，主机会自动恢复连接。"),
                         Desktop::Ready=>continue,
@@ -609,7 +612,7 @@ pub fn window(options: Options) -> Result<(), String> {
                 }
                 Input::Button(desktop_menu::RESTORE) => {
                     if connection.is_some() {
-                        notice("请先锁屏并结束隐私。串流服务停止后才可在本机恢复显示。");
+                        notice("请先结束隐私模式。串流服务停止后可在本机恢复显示。");
                     } else if unsafe {
                         MessageBoxW(
                             main,

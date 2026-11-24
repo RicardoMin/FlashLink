@@ -2,7 +2,7 @@
 //! closing the host drops the pipe, even when the GUI is killed before doing normal cleanup.
 use super::{
     privacy_display::{self, Target, Topology},
-    privacy_time::{recovery_step, RecoveryStep, State, Timer},
+    privacy_time::{State, Timer},
 };
 use std::{
     fs::{self, File, OpenOptions},
@@ -23,7 +23,6 @@ use windows_sys::Win32::{
     Foundation::WAIT_OBJECT_0,
     System::{
         RemoteDesktop::*,
-        Shutdown::LockWorkStation,
         Threading::{
             OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
             PROCESS_TERMINATE,
@@ -120,53 +119,49 @@ pub fn locked() -> Option<bool> {
     }
 }
 fn restore(dir: &Path, journal: &Journal, original: Option<&Topology>) -> Result<(), String> {
-    record(dir, "locking");
-    let mut saw_lock = false;
     let mut reported = false;
-    let mut logged_manual = false;
     loop {
-        let state = locked();
-        let manual = state == Some(false)
+        let manual = locked() == Some(false)
             && fs::read_to_string(dir.join(MANUAL)).is_ok_and(|s| s == journal.transaction);
-        let step = recovery_step(state, saw_lock, manual);
-        if step == RecoveryStep::Restore {
-            if !saw_lock && !manual {
-                record(dir, "locked");
-                saw_lock = true;
+        let log_dir = (!reported).then_some(dir);
+        if !journal.restored() {
+            if let Some(topo) = original {
+                let _ = topo.restore(log_dir);
             }
-            // A changed cable or monitor may make the exact in-memory snapshot inapplicable.
-            // Validate what Windows actually did. An explicit local recovery can accept the
-            // current saved physical outputs after a cable change.
-            let log_dir = (!reported || (manual && !logged_manual)).then_some(dir);
-            if manual {
-                logged_manual = true;
-            }
-            let _ = original.map(|topo| topo.restore(log_dir));
             if !journal.restored() {
                 let _ = privacy_display::restore_database(log_dir);
             }
-            if journal.restored()
-                || (manual && Topology::active().is_ok_and(|s| s.has_physical_output()))
-            {
-                if reported {
-                    privacy_display::log_restore_recovered(dir, manual);
-                }
-                return journal.clear(dir);
-            }
-            if !reported {
-                record(dir, "restore_pending");
-                reported = true;
-            }
-        } else if step == RecoveryStep::Lock {
-            unsafe {
-                LockWorkStation();
-            }
         }
-        // Some GPUs reject SetDisplayConfig on Winlogon's secure desktop. A subsequent user
-        // unlock is respected; wait for a local restore action or the next independent lock.
+        if journal.restored() || (manual && Topology::active().is_ok_and(|s| s.has_physical_output())) {
+            if reported { privacy_display::log_restore_recovered(dir, manual); }
+            return journal.clear(dir);
+        }
+        if !reported {
+            record(dir, "restore_pending");
+            reported = true;
+        }
         thread::sleep(Duration::from_secs(1));
     }
 }
+
+fn restore_while_connected(
+    dir: &Path, journal: &Journal, original: &Topology, icons: &crate::desktop_icons::DesktopIcons,
+) -> Result<bool, String> {
+    let deadline = Instant::now() + Duration::from_secs(6);
+    while Instant::now() < deadline && locked() == Some(false) {
+        if !journal.restored() && original.restore(Some(dir)).is_err() {
+            let _ = privacy_display::restore_database(Some(dir));
+        }
+        if journal.restored() {
+            icons.finish();
+            journal.clear(dir)?;
+            return Ok(true);
+        }
+        thread::sleep(Duration::from_millis(350));
+    }
+    Ok(false)
+}
+
 fn protect_engine(pid: u32) -> Result<OwnedHandle, String> {
     let raw = unsafe { OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, 0, pid) };
     if raw.is_null() {
@@ -183,6 +178,11 @@ fn report(s: &str) {
     let mut out = io::stdout().lock();
     let _ = writeln!(out, "{s}");
     let _ = out.flush();
+}
+
+enum Control {
+    Beat(Instant),
+    End,
 }
 
 pub fn run(dir: &Path, engine: Option<u32>) -> Result<(), String> {
@@ -222,26 +222,34 @@ pub fn run(dir: &Path, engine: Option<u32>) -> Result<(), String> {
         targets: original.targets()?,
     };
     let mut plan = Topology::virtual_only_plan(dir, &original)?;
-    let (tx, rx) = mpsc::sync_channel(4);
+    let icons = crate::desktop_icons::DesktopIcons::capture()?;
+    let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         for line in io::stdin().lock().lines() {
             match line {
                 Ok(s) if s == "beat" => {
-                    if tx.try_send(Instant::now()).is_err() {
+                    if tx.send(Control::Beat(Instant::now())).is_err() {
                         break;
                     }
+                }
+                Ok(s) if s == "end" => {
+                    let _ = tx.send(Control::End);
+                    break;
                 }
                 _ => break,
             }
         }
     });
     // Never touch displays if the parent lost its paired stream while preparing this plan.
-    let mut latest = rx
+    let Control::Beat(mut latest) = rx
         .recv_timeout(Duration::from_secs(4))
-        .map_err(|_| "串流已中断，请重新连接。".to_string())?;
+        .map_err(|_| "串流已中断，请重新连接。".to_string())? else {
+            return Err("已取消切换".into());
+        };
     loop {
         match rx.try_recv() {
-            Ok(t) => latest = t,
+            Ok(Control::Beat(t)) => latest = t,
+            Ok(Control::End) => return Err("已取消切换".into()),
             Err(mpsc::TryRecvError::Empty) => break,
             Err(mpsc::TryRecvError::Disconnected) => return Err("主机已退出".into()),
         }
@@ -251,38 +259,91 @@ pub fn run(dir: &Path, engine: Option<u32>) -> Result<(), String> {
     }
     journal.save(dir)?;
     if let Err(e) = plan.activate(dir) {
-        // SetDisplayConfig can fail after a topology change. Only unlock recovery bookkeeping
-        // without locking when we can positively verify that our original paths never changed.
+        // A failed mode set may already have changed the active paths.
         if journal.restored() {
             journal.clear(dir)?;
             return Err(e);
         }
-        stop_engine(&engine);
-        restore(dir, &journal, Some(&original))?;
+        if !restore_while_connected(dir, &journal, &original, &icons)? {
+            stop_engine(&engine);
+            restore(dir, &journal, Some(&original))?;
+        }
         return Err(e);
     }
     let mut timer = Timer::new(Instant::now());
     let mut last = State::Playing;
-    if plan.still_private() {
+    let mut repair = super::privacy_time::DisplayRepair::default();
+    let mut align_at = Some(Instant::now() + Duration::from_millis(900));
+    let mut display_failed = true;
+    if plan.still_private(dir) {
+        display_failed = false;
+        icons.align();
         record(dir, "private");
         report("PRIVATE");
         loop {
             let received = rx.recv_timeout(Duration::from_millis(250));
             if matches!(received, Err(mpsc::RecvTimeoutError::Disconnected)) {
+                record(dir, "guard_pipe_closed");
                 break;
             }
             let now = Instant::now();
-            if !plan.still_private()
-                || locked() != Some(false)
-                || unsafe { WaitForSingleObject(engine.as_raw_handle(), 0) } == WAIT_OBJECT_0
-            {
+            if locked() != Some(false) {
+                record(dir, "guard_desktop_unavailable");
                 break;
+            }
+            if unsafe { WaitForSingleObject(engine.as_raw_handle(), 0) } == WAIT_OBJECT_0 {
+                record(dir, "guard_engine_exited");
+                break;
+            }
+            if matches!(received, Ok(Control::End)) {
+                if latest.elapsed() < super::privacy_time::STALE {
+                    if restore_while_connected(dir, &journal, &original, &icons)? {
+                        report("VISIBLE");
+                        return Ok(());
+                    }
+                }
+                break;
+            }
+            if let Ok(Control::Beat(ts)) = received {
+                latest = ts;
             }
             let state = timer.tick(
                 now,
-                received.is_ok_and(|ts| now.duration_since(ts) < Duration::from_secs(1)),
+                matches!(received, Ok(Control::Beat(ts)) if now.duration_since(ts) < Duration::from_secs(1)),
             );
-            if state == State::Locking {
+            if !plan.still_private(dir) {
+                if state != State::Playing {
+                    record(dir, "guard_display_without_lease");
+                    break;
+                }
+                if !repair.can_repair(now) {
+                    display_failed = true;
+                    record(dir, "guard_display_timeout");
+                    break;
+                }
+                match plan.reapply_if_known_displays(dir, &original, &journal.targets) {
+                    Ok(true) => {
+                        repair.reapplied(Instant::now());
+                        record(dir, "display_reapplied");
+                    }
+                    Ok(false) => repair.verified(),
+                    Err(reason) => {
+                        display_failed = true;
+                        privacy_display::log_repair_error(dir, &reason);
+                        record(dir, "guard_display_changed");
+                        break;
+                    }
+                }
+                align_at = Some(Instant::now() + Duration::from_millis(900));
+            } else {
+                repair.verified();
+                if align_at.is_some_and(|after| now >= after) {
+                    icons.align();
+                    align_at = None;
+                }
+            }
+            if state == State::Expired {
+                record(dir, "guard_lease_expired");
                 break;
             }
             if state != last {
@@ -303,10 +364,17 @@ pub fn run(dir: &Path, engine: Option<u32>) -> Result<(), String> {
             }
         }
     } else {
-        plan.log_active_mismatch(dir);
+        record(dir, "guard_display_changed");
+    }
+    if display_failed && latest.elapsed() < super::privacy_time::STALE {
+        report("DISPLAY_UNSTABLE");
+        if restore_while_connected(dir, &journal, &original, &icons)? {
+            report("VISIBLE_FALLBACK");
+            return Ok(());
+        }
     }
     stop_engine(&engine);
-    report("LOCKING");
+    report("RECOVERING");
     restore(dir, &journal, Some(&original))?;
     report("RESTORED");
     Ok(())
@@ -360,8 +428,17 @@ impl Guard {
             self.last = ts;
         }
     }
-    pub fn finish(&mut self) {
-        self.pipe.take();
+    pub fn finish(&mut self, dir: &Path, reason: &str) {
+        if self.pipe.is_some() {
+            record(dir, reason);
+            self.pipe.take();
+        }
+    }
+    pub fn end_by_user(&mut self, dir: &Path) {
+        if let Some(mut pipe) = self.pipe.take() {
+            record(dir, "guard_user_end");
+            let _ = writeln!(pipe, "end");
+        }
     }
     pub fn exited(&mut self) -> bool {
         if self.child.try_wait().is_ok_and(|v| v.is_some()) {

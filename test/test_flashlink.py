@@ -30,7 +30,7 @@ OBSERVATIONS = {
     "audio": "从首句语音开始，声音连续、左右声道正确，且与画面同步吗？",
     "privacy": "开启隐私后，每块物理屏都看不到桌面，而平板仍能正常翻页吗？",
     "reconnect": "短时断开 Wi-Fi 再恢复，能自动回到同一会话吗？",
-    "lock_before_restore": "持续断网直到超时，物理屏恢复时最先看到的是 Windows 锁屏吗？",
+    "desktop_after_restore": "持续断网直到超时，串流是否结束且实体屏恢复当前桌面？",
 }
 HOST_MARKERS = {
     "connect_events": "CLIENT CONNECTED",
@@ -254,7 +254,7 @@ def privacy_events(log):
         lines = file.read().decode("ascii", errors="replace").splitlines()[-256:]
     events = []
     for line in lines:
-        match = re.fullmatch(r"(\d{1,12})\s+(private|lost|resumed|locking|locked|restored|restore_pending)", line)
+        match = re.fullmatch(r"(\d{1,12})\s+(private|lost|resumed|locking|locked|restored|restore_pending|display_reapplied|guard_(?:pipe_closed|display_changed|display_timeout|display_without_lease|desktop_unavailable|engine_exited|lease_expired|user_end|owner_unavailable|management_unavailable))", line)
         if match:
             events.append({"unix_seconds": int(match[1]), "event": match[2]})
     return events

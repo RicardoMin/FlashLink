@@ -5,17 +5,10 @@ pub const MODE_IDX_INVALID: u32 = u32::MAX;
 const ROTATION_IDENTITY: i32 = 1;
 const ROTATION_MAX: i32 = 4;
 const SCALING_PREFERRED: i32 = 128;
-const DEFAULT_WIDTH: u32 = 1920;
-const DEFAULT_HEIGHT: u32 = 1080;
-const SECONDARY_FALLBACK_WIDTH: u32 = 1366;
-const SECONDARY_FALLBACK_HEIGHT: u32 = 768;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlanStrategy {
     SuppliedFullModes,
     SuppliedSourceOnly,
-    TopologySupplied,
-    SuppliedNoModes,
 }
 
 impl PlanStrategy {
@@ -23,8 +16,6 @@ impl PlanStrategy {
         match self {
             Self::SuppliedFullModes => "supplied_full_modes",
             Self::SuppliedSourceOnly => "supplied_source_only",
-            Self::TopologySupplied => "topology_supplied",
-            Self::SuppliedNoModes => "supplied_no_modes",
         }
     }
 }
@@ -47,24 +38,6 @@ pub fn normalize_scaling(raw: i32) -> i32 {
     } else {
         SCALING_PREFERRED
     }
-}
-
-pub fn fallback_resolutions(primary: Option<(u32, u32)>) -> Vec<(u32, u32)> {
-    let mut out = Vec::with_capacity(3);
-    if let Some((w, h)) = primary {
-        if (800..=7680).contains(&w) && (600..=4320).contains(&h) {
-            out.push((w, h));
-        }
-    }
-    for candidate in [
-        (DEFAULT_WIDTH, DEFAULT_HEIGHT),
-        (SECONDARY_FALLBACK_WIDTH, SECONDARY_FALLBACK_HEIGHT),
-    ] {
-        if !out.contains(&candidate) {
-            out.push(candidate);
-        }
-    }
-    out
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -195,23 +168,6 @@ mod tests {
         for valid in [1, 2, 3, 4, 5, 128] {
             assert_eq!(normalize_scaling(valid), valid);
         }
-    }
-
-    #[test]
-    fn builds_deduplicated_fallback_resolution_order() {
-        assert_eq!(
-            fallback_resolutions(Some((2560, 1440))),
-            vec![(2560, 1440), (1920, 1080), (1366, 768)]
-        );
-        assert_eq!(
-            fallback_resolutions(Some((1920, 1080))),
-            vec![(1920, 1080), (1366, 768)]
-        );
-        assert_eq!(
-            fallback_resolutions(Some((320, 240))),
-            vec![(1920, 1080), (1366, 768)]
-        );
-        assert_eq!(fallback_resolutions(None), vec![(1920, 1080), (1366, 768)]);
     }
 
     #[test]
