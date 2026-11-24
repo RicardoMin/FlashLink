@@ -7,7 +7,14 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.SystemClock;
+import android.preference.PreferenceManager;
 import android.util.Log;
+import android.view.MotionEvent;
+import android.view.View;
+
+import com.limelight.nvstream.NvConnection;
+import com.limelight.nvstream.input.MouseButtonPacket;
+import com.limelight.preferences.PreferenceConfiguration;
 
 /** Thin shell around Moonlight's real Activity and its native callbacks. */
 public final class FlashLinkGame extends Game {
@@ -21,6 +28,7 @@ public final class FlashLinkGame extends Game {
     private long startedAt;
     private boolean foreground;
     private FlashLinkStreamTools tools;
+    private FlashLinkDirectTouch directTouch;
     private FlashLinkPrivacyLease privacyLease;
 
     @Override protected void onCreate(Bundle state) {
@@ -51,7 +59,10 @@ public final class FlashLinkGame extends Game {
     }
 
     @Override public void connectionTerminated(int code) {
-        runOnUiThread(this::closeLease);
+        runOnUiThread(() -> {
+            releaseControls();
+            closeLease();
+        });
         if (!FlashLinkReconnect.transportLost(code)) {
             timer.removeCallbacks(expire);
             super.connectionTerminated(code);
@@ -85,9 +96,48 @@ public final class FlashLinkGame extends Game {
 
     private void endWith(int result, long deadline) {
         if (isFinishing() || isDestroyed()) return;
-        if (tools != null) tools.release();
+        releaseControls();
         setResult(result, new Intent().putExtra(DEADLINE, deadline));
         finish();
+    }
+
+    @Override protected boolean handleDirectFingerTouch(View source, View video, MotionEvent event,
+                                                        NvConnection connection) {
+        if (tools == null || !foreground || !hasWindowFocus() || isFinishing()) return true;
+        if (directTouch == null) {
+            directTouch = new FlashLinkDirectTouch(video, new FlashLinkTouchGesture.Output() {
+                public void position(short x, short y, short width, short height) {
+                    connection.sendMousePosition(x, y, width, height);
+                }
+                public void button(boolean right, boolean down) {
+                    byte button = right ? MouseButtonPacket.BUTTON_RIGHT : MouseButtonPacket.BUTTON_LEFT;
+                    if (down) connection.sendMouseButtonDown(button);
+                    else connection.sendMouseButtonUp(button);
+                }
+                public void scroll(short amount) {
+                    connection.sendMouseHighResScroll(amount);
+                }
+            });
+        }
+        directTouch.onTouch(source, event);
+        return true;
+    }
+
+    @Override protected void onTouchscreenCancelled() {
+        if (directTouch != null) directTouch.cancel();
+    }
+
+    void toggleTouchMode() {
+        if (tools != null) tools.release();
+        boolean trackpad = !isTouchscreenTrackpad();
+        setTouchscreenTrackpad(trackpad);
+        PreferenceManager.getDefaultSharedPreferences(this).edit()
+                .putBoolean(PreferenceConfiguration.TOUCHSCREEN_TRACKPAD_PREF_STRING, trackpad).apply();
+    }
+
+    private void releaseControls() {
+        cancelTouchscreenInput();
+        if (tools != null) tools.release();
     }
 
     void leaveStream() {
@@ -102,15 +152,20 @@ public final class FlashLinkGame extends Game {
     @Override protected void onResume() { super.onResume(); foreground = true; }
     @Override public void onWindowFocusChanged(boolean focus) {
         super.onWindowFocusChanged(focus);
-        if (!focus && tools != null) tools.release();
+        if (!focus) releaseControls();
     }
     @Override protected void onPause() {
         foreground = false;
-        if (tools != null) tools.release();
+        releaseControls();
         super.onPause();
+    }
+    @Override public void onConfigurationChanged(Configuration config) {
+        releaseControls();
+        super.onConfigurationChanged(config);
     }
     @Override public void onPictureInPictureModeChanged(boolean active, Configuration config) {
         super.onPictureInPictureModeChanged(active, config);
+        if (active) releaseControls();
         if (tools != null && Build.VERSION.SDK_INT >= 26) tools.setVisible(!active);
     }
     private void closeLease() {
@@ -126,6 +181,7 @@ public final class FlashLinkGame extends Game {
     }
 
     @Override protected void onDestroy() {
+        releaseControls();
         closeLease();
         timer.removeCallbacks(expire);
         super.onDestroy();

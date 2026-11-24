@@ -128,13 +128,18 @@ def development():
     if checks["client_ffi_build"]["status"] == "passed":
         flutter_test.append("--dart-define=FLASHLINK_TEST_CLIENT_LIBRARY=" + str(native))
     check("flutter_tests", flutter_test, APP)
+    android = ROOT / "apps/android/src"
+    main_java = android / "main/java/com/limelight"
+    test_java = android / "test/java/com/limelight"
     with tempfile.TemporaryDirectory() as java_classes:
-        check("android_recovery_compile", [jdk_tool("javac"), "-d", java_classes,
-              ROOT / "apps/android/src/main/java/com/limelight/FlashLinkReconnect.java",
-              ROOT / "apps/android/src/test/java/com/limelight/FlashLinkReconnectTest.java"])
-        if checks["android_recovery_compile"]["status"] == "passed":
-            check("android_recovery_policy", [jdk_tool("java"), "-ea", "-cp", java_classes,
-                  "com.limelight.FlashLinkReconnectTest"])
+        for check_name, name in (("android_recovery", "FlashLinkReconnect"),
+                                 ("android_touch", "FlashLinkTouchGesture")):
+            compile_check = check_name + "_compile"
+            check(compile_check, [jdk_tool("javac"), "-d", java_classes,
+                  main_java / (name + ".java"), test_java / (name + "Test.java")])
+            if checks[compile_check]["status"] == "passed":
+                check(check_name + "_policy", [jdk_tool("java"), "-ea", "-cp", java_classes,
+                      "com.limelight." + name + "Test"])
     return checks
 
 
