@@ -4,12 +4,12 @@
 
 ## 准备两端应用
 
-| 设备 | 系统要求 | 试玩包中的文件 |
+| 设备 | 系统要求 | 应用文件 |
 | --- | --- | --- |
 | 被控电脑 | Windows 10/11 x64，已登录且桌面解锁 | `FlashLink-Windows-x64.exe` |
 | 手机或平板 | Android 7.0 及以上，arm64 | `FlashLink-Android-arm64.apk` |
 
-已有试玩包时，分别把 EXE 和 APK 放到对应设备上。Windows 单文件应用内含 Sunshine，安卓应用内含 Moonlight。若使用 Windows 便携 ZIP，请先完整解压，再双击其中的 `FlashLink.exe`。从 Git 克隆项目的开发者可以按下方步骤生成安装包。
+将 EXE 和 APK 分别复制到对应设备。Windows 单文件应用内含 Sunshine，安卓应用内含 Moonlight。若使用 Windows 便携 ZIP，请先完整解压，再双击其中的 `FlashLink.exe`。从 Git 克隆项目的开发者可以按下方步骤生成安装包。
 
 ## 首次连接
 
@@ -21,16 +21,16 @@
 
 ## 串流中的操作
 
-在远程桌面顶部点「鼠标」展开触控板、左中右键和上下滚动。点「拖动」后移动指针，再点一次释放。点「工具」可以发送空格、回车等快捷键，输入一段文字，或主动断开。面板收起后可以继续直接点游戏画面。
+在远程桌面顶部点「鼠标」展开触控板、左中右键和上下滚动。点「拖动」后移动指针，再点一次释放。点「工具」可以发送空格、回车等快捷键，输入一段文字，或主动断开。
 
 正在玩的会话因网络异常中断时，安卓自动尝试连接同一台已授权电脑，最长尝试 15 秒。超时后可回设备列表重试。手动断开会直接退出。Windows 在普通模式下继续显示本地桌面。按 Win+L 会暂停串流和附近发现，本机解锁后主机会自动重新上线，保留原来的配对。
 
 ## 隐私黑屏（真机待验收）
 
 1. 在 Windows 打开「主机 → 安装虚拟屏…」，按系统提示完成随包组件的安装。如果系统要求重启，重启后再连接。
-2. 安卓先进入远程桌面。当前试玩版开启隐私时要求只有一台启用了授权的客户端，并且电脑处于已解锁状态。
+2. 安卓先进入远程桌面。当前开启隐私时要求只有一台启用了授权的客户端，并且电脑处于已解锁状态。
 3. 在 Windows 主机菜单选「开启隐私 / 锁屏并结束隐私」。也可以在安卓串流的桌面里操作同一个 Windows 窗口。若主机已收起，点任务栏通知区的 FlashLink 图标打开。看到开启提示后，对照平板及各物理屏确认实际效果。
-4. 隐私期间掉线，主机会为原设备保留短时重连机会。超时、主动结束隐私或主程序异常退出时，守护进程请求锁屏，确认 Windows 已锁定后尝试恢复显示。恢复完成且在本机解锁后，主机会重新上线。若驱动在锁屏时拒绝恢复，主机会保留恢复记录。回到电脑、解锁且串流已停止后，可在「主机 → 本机恢复显示…」确认恢复。若所有物理屏都不可见，重启电脑可让 Windows 重新应用已保存的显示配置。此次没有实体 Windows 验证，首次试用请用普通桌面内容检查。
+4. 隐私期间掉线，主机会为原设备保留短时重连机会。超时、主动结束隐私或主程序异常退出时，守护进程请求锁屏，确认 Windows 已锁定后尝试恢复显示。恢复完成且在本机解锁后，主机会重新上线。若驱动在锁屏时拒绝恢复，主机会保留恢复记录。回到电脑、解锁且串流已停止后，可在「主机 → 本机恢复显示…」确认恢复。若所有物理屏都不可见，重启电脑可让 Windows 重新应用已保存的显示配置。已有 Windows 实机在开启时报告错误 87，首次使用请确认各物理屏的实际状态。[已知问题 #5](https://github.com/RicardoMin/FlashLink/issues/5)
 
 ## 画质设置和连接问题
 
@@ -48,10 +48,10 @@
 在仓库根目录运行以下命令。需要 Python 3.8 或更新版本，以及项目使用的 Rust、Flutter SDK 和 JDK。可以通过 `FLUTTER_BIN` 指定 Flutter 可执行文件，通过 `JAVA_HOME` 指定 JDK。报告会记录缺少的工具。
 
 ```sh
-python3 test/test_flashlink.py --preview
+python3 test/test_flashlink.py --mode dev
 ```
 
-这个命令运行 Rust、Flutter 和 Android 重连策略测试，将一份带时间的 JSON 写入 `testdata/`，将手机、平板的示例界面写入 `testdata/ui-preview/`。预览使用测试设备数据。单元测试无需 Windows、安卓设备或模拟器。
+这个命令运行 Rust、Flutter 和 Android 重连策略测试，将一份带时间的 JSON 写入 `testdata/`。单元测试无需 Windows、安卓设备或模拟器。
 
 将开过串流的安卓设备通过 USB 接到 Mac，允许 USB 调试，在 Mac 准备好 Android Platform Tools 后，运行以下命令。它读取最近串流的重连事件、接收和提交到 Surface 的帧数、丢帧及解码耗时。静态桌面上的数字受画面变化影响，评估 60/120 FPS 请播放有持续运动的素材。可以通过环境变量 `ADB` 指定可执行文件；多设备时用 `ANDROID_SERIAL` 选择设备。
 
@@ -59,11 +59,11 @@ python3 test/test_flashlink.py --preview
 python3 test/test_flashlink.py --mode field --android
 ```
 
-**Windows 试玩者可直接在「主机 → 导出测试报告…」保存数据**，文件在系统文稿文件夹下的 `FlashLink/testdata/`。从源码运行则可在仓库根目录执行 `.\test\Test-FlashLink.ps1`，默认写入仓库的 `testdata/`。该报告包含显卡型号、驱动、系统桌面模式、当前及上次有串流日志的事件计数、分类告警与错误、隐私状态变化。电脑端与安卓端的报告可以一起带回 Mac，工具只写本地文件。
+**Windows 用户可直接在「主机 → 导出测试报告…」保存数据**，文件在系统文稿文件夹下的 `FlashLink/testdata/`。从源码运行则可在仓库根目录执行 `.\crates\host-windows\assets\Export-FlashLinkReport.ps1`，默认写入相同位置。该报告包含显卡型号、驱动、系统桌面模式、当前及上次有串流日志的事件计数、分类告警与错误、隐私状态变化。电脑端与安卓端的报告可以一起带回 Mac，工具只写本地文件。
 
 要补记首句声音、触控和每块显示器实际表现，在 Python 命令中添加 `--mode field --observe`；直接回车会保留「未测试」。`dev` 返回 0 代表自动检查通过；`field` 返回 0 代表取得数据或观察，实体屏验收以观察字段为准。返回 1 表示记录到了失败，2 表示此次未采集到所请求的数据或缺少开发工具。[测试入口](../test/test_flashlink.py)
 
-## 从源码生成试玩包
+## 从源码构建
 
 以下命令均从仓库根目录执行。首次构建需要联网获取上游源码和构建依赖。
 
@@ -73,22 +73,18 @@ python3 test/test_flashlink.py --mode field --android
 
 ```powershell
 cargo build --locked --release -p flashlink-host
-python packaging/windows/bundle.py --exe target/release/flashlink-host.exe --sunshine-zip "$env:USERPROFILE\Downloads\Sunshine-Windows-AMD64-lite.zip" --sunshine-license "$env:USERPROFILE\Downloads\Sunshine-LICENSE"
+python crates/host-windows/bundle.py --exe target/release/flashlink-host.exe --sunshine-zip "$env:USERPROFILE\Downloads\Sunshine-Windows-AMD64-lite.zip" --sunshine-license "$env:USERPROFILE\Downloads\Sunshine-LICENSE"
 ```
 
 打包脚本核验 Sunshine 的 SHA-256 后生成 `dist/FlashLink-Windows-x64.exe` 和 `dist/FlashLink-Windows-x64.zip`。
 
 ### Android 控制端
 
-试玩版使用 Flutter 3.38.9、JDK 17、Rust、Python 3 和 Git。Android SDK 需包含 Platform 36、Build Tools 35.0.0 和 36.0.0、NDK 28.2.13676358、CMake 3.22.1。设置 `ANDROID_HOME` 和 `JAVA_HOME`，并确保可以调用 `flutter`。
+Android 构建使用 Flutter 3.38.9、JDK 17、Rust、Python 3 和 Git。Android SDK 需包含 Platform 36、Build Tools 35.0.0 和 36.0.0、NDK 28.2.13676358、CMake 3.22.1。设置 `ANDROID_HOME` 和 `JAVA_HOME`，并确保可以调用 `flutter`。
 
 ```sh
 rustup target add aarch64-linux-android
-python3 scripts/android_demo.py
+python3 apps/android/build.py
 ```
 
-把生成的 `build/android-demo/flashlink-arm64-debug.apk` 安装到安卓设备。可在系统的应用信息中核对版本 `0.3.0-demo`（316）。[Android 构建脚本](../scripts/android_demo.py)
-
-## 验证范围
-
-已在 Android 14 arm64 模拟器上验证自动发现、允许和拒绝首次请求，以及覆盖安装后的直接重连。实际串流测试使用隔离的 Linux Sunshine 主机，安卓收到 1280×720 桌面画面，触屏点击回传到了主机。Windows x64 产物已完成交叉编译和打包检查。新版 APK 在同一测试环境通过了实际左右中键、滚轮、空格和回车回传。一次短时断网从检测到恢复约 7 秒，持续断网则在检测后约 15 秒停止尝试；主动退出没有触发重连。已配对的安卓播放器通过了与 Windows 共用的 Rust 心跳认证。物理 Windows 电脑上的 GPU 编码、声音稳定性、隐私黑屏与锁定恢复、1440p/60 和 120 FPS 尚待真机验证。
+把生成的 `build/android/flashlink-arm64-debug.apk` 安装到安卓设备。可在系统的应用信息中核对版本 `0.3.0-demo`（316）。[Android 构建脚本](../apps/android/build.py)

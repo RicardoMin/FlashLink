@@ -27,7 +27,6 @@ public final class FlashLinkActivity extends FlutterActivity {
     private static final String SAVED_ATTEMPT = "dev.flashlink.attempt";
     private static final String SAVED_PROCESS = "dev.flashlink.process";
     private static final String PROCESS_TOKEN = UUID.randomUUID().toString();
-    private static final String LAST_HOST = "dev.flashlink.lastHost";
     private MethodChannel.Result pendingLaunch;
     private long attemptId;
 
@@ -84,10 +83,6 @@ public final class FlashLinkActivity extends FlutterActivity {
                 }, "FlashLink LAN discovery").start();
                 return;
             }
-            if (call.method.equals("lastHost")) {
-                result.success(getPreferences(MODE_PRIVATE).getString(LAST_HOST, null));
-                return;
-            }
             if (call.method.equals("settings")) {
                 if (attemptId != 0) {
                     result.error("busy", "Close the player before changing settings.", null);
@@ -127,7 +122,6 @@ public final class FlashLinkActivity extends FlutterActivity {
                 pendingLaunch = result;
                 attemptId = attempt.longValue();
                 startActivityForResult(intent, PLAYER_REQUEST);
-                getPreferences(MODE_PRIVATE).edit().putString(LAST_HOST, host).apply();
             } catch (IllegalArgumentException | android.content.ActivityNotFoundException e) {
                 pendingLaunch = null;
                 attemptId = 0;
@@ -154,7 +148,7 @@ public final class FlashLinkActivity extends FlutterActivity {
         } catch (URISyntaxException ignored) {
             // Return the same actionable message for invalid hostnames and invalid ports.
         }
-        throw new IllegalArgumentException("Enter a PC address or hostname and optional port.");
+        throw new IllegalArgumentException("电脑返回的地址无效，请刷新设备列表。");
     }
 
     @Override

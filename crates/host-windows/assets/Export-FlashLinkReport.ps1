@@ -2,14 +2,11 @@
 [CmdletBinding()]
 param(
     [string]$StateDir = (Join-Path $env:LOCALAPPDATA 'FlashLink\DemoHost'),
-    [string]$OutputDir,
+    [string]$OutputDir = (Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'FlashLink/testdata'),
     [string]$HostExecutable
 )
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
-if (-not $OutputDir) {
-    $OutputDir = Join-Path (Split-Path $PSScriptRoot -Parent) 'testdata'
-}
 
 $now = [DateTime]::UtcNow
 $video = @()

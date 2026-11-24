@@ -85,8 +85,7 @@ pub fn relaunch_installed() -> io::Result<bool> {
     lock.lock()?;
     if !installed.is_file() || hash_file(&installed)? != hash_file(&current)? {
         let tmp = dir.join(format!("update-{}.exe", nonce()?));
-        fs::copy(&current, &tmp)?;
-        if let Err(e) = fs::rename(&tmp, &installed) {
+        if let Err(e) = fs::copy(&current, &tmp).and_then(|_| fs::rename(&tmp, &installed)) {
             let _ = fs::remove_file(tmp);
             return Err(io::Error::other(format!(
                 "更新本机主程序失败。请先关闭已运行的 FlashLink：{e}"
@@ -158,10 +157,21 @@ pub fn prepare() -> io::Result<Option<PathBuf>> {
         if !status.success() || hash_file(&unpack.join("Sunshine/sunshine.exe"))? != EXE_HASH {
             return Err(io::Error::other("无法解压或验证内置 Sunshine。"));
         }
-        if installed.exists() {
-            fs::rename(&installed, root.join(format!("previous-runtime-{token}")))?;
+        if installed.try_exists()? {
+            let previous = root.join(format!("previous-runtime-{token}"));
+            fs::rename(&installed, &previous)?;
+            if let Err(error) = fs::rename(&unpack, &installed) {
+                fs::rename(&previous, &installed).map_err(|restore_error| {
+                    io::Error::other(format!(
+                        "替换引擎失败：{error}。原引擎保存在 {}，恢复失败：{restore_error}",
+                        previous.display()
+                    ))
+                })?;
+                return Err(error);
+            }
+        } else {
+            fs::rename(unpack, &installed)?;
         }
-        fs::rename(unpack, &installed)?;
         Ok(Some(exe))
     })();
     let _ = fs::remove_dir_all(stage);

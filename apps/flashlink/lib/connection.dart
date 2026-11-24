@@ -12,11 +12,11 @@ final class ConnectionController extends ChangeNotifier {
   final _known = <String, NearbyDevice>{};
   Set<String> _visible = {};
   SessionCore? _core;
+  Future<void>? _discovery;
   SessionPhase phase = SessionPhase.idle;
-  String? feedback;
   String? activeDevice;
   String? discoveryError;
-  bool scanning = false;
+  bool get scanning => _discovery != null;
   bool scanned = false;
   bool _disposed = false;
 
@@ -25,12 +25,18 @@ final class ConnectionController extends ChangeNotifier {
   List<NearbyDevice> get unavailable =>
       _known.values.where((d) => !_visible.contains(d.id)).toList();
 
-  Future<void> discover() async {
-    if (_disposed || scanning) return;
-    scanning = true;
+  Future<void> discover() {
+    if (_disposed) return Future.value();
+    final pending = _discovery;
+    if (pending != null) return pending;
+    final request = _discovery = _scan();
     _refresh();
+    return request;
+  }
+
+  Future<void> _scan() async {
     try {
-      final devices = await _player.discover();
+      final devices = await Future.sync(_player.discover);
       if (_disposed) return;
       _visible = {for (final device in devices) device.id};
       for (final device in devices) {
@@ -41,40 +47,39 @@ final class ConnectionController extends ChangeNotifier {
       _visible = {};
       discoveryError = '设备发现暂时不可用，请检查 Wi-Fi 后重新查找。';
     } finally {
-      scanning = false;
+      _discovery = null;
       scanned = true;
       _refresh();
     }
   }
 
-  Future<void> openSettings() async {
-    if (phase != SessionPhase.idle) return;
+  Future<String?> openSettings() async {
+    if (_disposed || phase != SessionPhase.idle) return null;
     try {
       await _player.openSettings();
     } catch (_) {
-      feedback = '播放设置未能打开，请重试。';
-      _refresh();
+      return '播放设置未能打开，请重试。';
     }
+    return null;
   }
 
-  Future<void> connect(NearbyDevice device) async {
-    if (phase != SessionPhase.idle || !_visible.contains(device.id)) return;
+  Future<String?> connect(NearbyDevice device) async {
+    if (_disposed ||
+        phase != SessionPhase.idle ||
+        !_visible.contains(device.id)) {
+      return null;
+    }
     final target = _known[device.id]!;
     final SessionCore core;
     final int attemptId;
-    feedback = null;
     try {
       core = _core ??= _loadCore();
       attemptId = core.begin(target.host);
     } catch (_) {
-      feedback = '连接组件不可用，请重新安装 FlashLink。';
-      _refresh();
-      return;
+      return '连接组件不可用，请重新安装 FlashLink。';
     }
     if (attemptId <= 0) {
-      feedback = attemptId == -2 ? '已有连接正在进行，请先返回设备页。' : '暂时无法连接这台电脑，请刷新设备列表。';
-      _refresh();
-      return;
+      return attemptId == -2 ? '已有连接正在进行，请先返回设备页。' : '暂时无法连接这台电脑，请刷新设备列表。';
     }
     activeDevice = target.id;
     phase = core.phase;
@@ -90,17 +95,18 @@ final class ConnectionController extends ChangeNotifier {
       core.event(attemptId, PlayerEvent.returned);
     } on PlatformException catch (error) {
       core.event(attemptId, PlayerEvent.launchFailed);
-      feedback = error.message?.trim().isNotEmpty == true
+      return error.message?.trim().isNotEmpty == true
           ? error.message
           : '连接未完成，请重试。';
     } catch (_) {
       core.event(attemptId, PlayerEvent.launchFailed);
-      feedback = '连接未能开始，请重试。';
+      return '连接未能开始，请重试。';
     } finally {
       phase = core.phase;
       activeDevice = null;
       _refresh();
     }
+    return null;
   }
 
   void _refresh() {

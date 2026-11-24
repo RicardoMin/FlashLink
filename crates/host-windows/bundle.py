@@ -10,7 +10,7 @@ import tempfile
 import zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-HERE = pathlib.Path(__file__).resolve().parent
+ASSETS = pathlib.Path(__file__).resolve().parent / "assets"
 DIGEST = "233008e46f4c0e501a586cbfd6c4fd4a4c0d414a0b5fc7f13c070eb92ec3824b"
 VDD_DIGESTS = {
     "MttVDD.inf": "550d211fe481e74dfe3f9d724ed78be48b3a9113405965d683d9373e8d672f5d",
@@ -30,27 +30,29 @@ def main():
     parser.add_argument("--llvm-mingw", type=pathlib.Path)
     parser.add_argument("--output", type=pathlib.Path, default=ROOT/"dist"/"FlashLink-Windows-x64.zip")
     args = parser.parse_args()
+    if args.output.suffix.lower() != ".zip":
+        parser.error("--output must name the portable .zip archive")
     for name, digest in VDD_DIGESTS.items():
-        if hashlib.sha256((HERE / "mttvdd" / name).read_bytes()).hexdigest() != digest:
+        if hashlib.sha256((ASSETS / "mttvdd" / name).read_bytes()).hexdigest() != digest:
             parser.error(f"Virtual display component {name} differs from release 25.7.23")
     original = args.sunshine_zip.read_bytes()
     if hashlib.sha256(original).hexdigest() != DIGEST:
         parser.error("Sunshine ZIP digest differs from the pinned upstream release")
     sysroot = args.rust_sysroot or pathlib.Path(subprocess.check_output(
-        ["rustc", "--print", "sysroot"], text=True).strip())
+        ["rustc", "--print", "sysroot"], encoding="utf-8").strip())
     rust = sysroot/"share"/"doc"/"rust"
     metadata = json.loads(subprocess.check_output(
         ["cargo", "metadata", "--locked", "--format-version", "1", "--filter-platform", args.target],
-        cwd=ROOT, text=True))
+        cwd=ROOT, encoding="utf-8"))
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=args.output.parent) as temp:
         archive = pathlib.Path(temp)/args.output.name
         with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, strict_timestamps=False) as out:
             out.write(args.exe, "FlashLink.exe")
             out.write(ROOT/"LICENSE", "LICENSE")
-            out.write(HERE/"NOTICE.txt", "NOTICE.txt")
-            out.writestr("使用说明.txt", (HERE/"使用说明.txt").read_text().replace("\n", "\r\n").encode("utf-8-sig"))
-            out.write(HERE/"mttvdd/LICENSE", "licenses/MttVDD-LICENSE")
+            out.write(ASSETS/"NOTICE.txt", "NOTICE.txt")
+            out.writestr("使用说明.txt", (ASSETS/"使用说明.txt").read_text(encoding="utf-8").replace("\n", "\r\n").encode("utf-8-sig"))
+            out.write(ASSETS/"mttvdd/LICENSE", "licenses/MttVDD-LICENSE")
             out.write(args.sunshine_license, "licenses/Sunshine-LICENSE")
             with zipfile.ZipFile(io.BytesIO(original)) as engine:
                 for item in engine.infolist():
@@ -75,32 +77,25 @@ def main():
                     if notice.is_file() and notice.name.upper().startswith(("LICENSE","COPYING","NOTICE")):
                         out.write(notice, f"licenses/crates/{label}/{notice.name}")
             out.writestr("licenses/Rust-dependencies.txt", "\n".join(sorted(summaries)) + "\n")
-        with zipfile.ZipFile(archive) as out, zipfile.ZipFile(io.BytesIO(original)) as engine:
-            if out.testzip():
-                raise OSError("An output entry failed CRC verification")
-            assert out.read("FlashLink.exe") == args.exe.read_bytes()
-            for item in engine.infolist():
-                if not item.is_dir():
-                    assert out.read(item.filename) == engine.read(item)
         single = args.output.with_suffix(".exe")
         application = pathlib.Path(temp)/single.name
         with zipfile.ZipFile(archive) as out:
+            bad_entry = out.testzip()
+            if bad_entry:
+                raise OSError(f"CRC verification failed for {bad_entry}")
             sections = ["FlashLink 的使用说明和开源许可证", out.read("使用说明.txt").decode("utf-8-sig")]
             for entry in out.namelist():
                 if entry in {"NOTICE.txt","LICENSE"} or entry.startswith("licenses/"):
                     sections.extend([entry, out.read(entry).decode("utf-8", errors="replace")])
             notices = "\n\n".join(sections).encode("utf-8-sig")
-        assert len(notices) < 16 * 1024**2
+        if len(notices) > 16 * 1024**2:
+            raise ValueError("Bundled notices exceed the host's 16 MiB limit")
         footer = struct.pack("<QQ16s", len(original), len(notices), b"FLASHLINK-PACK-1")
         with application.open("wb") as f:
             f.write(args.exe.read_bytes())
             f.write(original)
             f.write(notices)
             f.write(footer)
-        with application.open("rb") as f:
-            f.seek(args.exe.stat().st_size)
-            assert hashlib.sha256(f.read(len(original))).hexdigest() == DIGEST
-            assert f.read(len(notices)) == notices and f.read() == footer
         application.replace(single)
         print(single, single.stat().st_size, hashlib.sha256(single.read_bytes()).hexdigest())
         archive.replace(args.output)

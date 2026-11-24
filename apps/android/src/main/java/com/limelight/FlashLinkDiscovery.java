@@ -30,7 +30,7 @@ import java.util.UUID;
 final class FlashLinkDiscovery {
     private static final int PORT = 47980;
 
-    static List<Map<String, String>> scan(Context context) throws Exception {
+    static List<Map<String, String>> scan(Context context) throws IOException {
         ConnectivityManager cm = (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
         Set<Network> networks = new LinkedHashSet<>();
         Network active = cm.getActiveNetwork();
@@ -50,7 +50,7 @@ final class FlashLinkDiscovery {
         throw new IOException("No Wi-Fi or Ethernet network");
     }
 
-    private static List<Map<String, String>> scan(Network network, LinkProperties link) throws Exception {
+    private static List<Map<String, String>> scan(Network network, LinkProperties link) throws IOException {
         Set<InetAddress> destinations = new LinkedHashSet<>();
         NetworkInterface nic = NetworkInterface.getByName(link.getInterfaceName());
         if (nic != null) {
