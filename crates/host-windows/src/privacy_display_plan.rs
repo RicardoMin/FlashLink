@@ -51,38 +51,117 @@ pub fn candidate_sort_key(active: bool, target_id: u32, source_id: u32) -> (bool
     (!active, target_id, source_id)
 }
 
-/// Choose one candidate index per target so that no two selected paths on the
-/// same adapter share a source ID (which Windows treats as clone or rejects).
-pub fn select_distinct_source_paths(
+/// Assign canonical clone-group IDs for targets sorted in deterministic order.
+/// Only targets that share an `(adapter_high, adapter_low, source_id)` with at
+/// least one other target receive `Some(group_id)`; solo sources stay `None` so
+/// single-monitor and extended layouts remain backward-compatible.
+pub fn canonical_source_groups(source_keys: &[(i32, u32, u32)]) -> Vec<Option<u32>> {
+    let mut shared_order: Vec<(i32, u32, u32)> = Vec::new();
+    for (idx, &key) in source_keys.iter().enumerate() {
+        let count = source_keys.iter().filter(|&&other| other == key).count();
+        if count > 1 && !shared_order.contains(&key) {
+            let _ = idx;
+            shared_order.push(key);
+        }
+    }
+    source_keys
+        .iter()
+        .map(|key| {
+            shared_order
+                .iter()
+                .position(|other| other == key)
+                .map(|pos| pos as u32)
+        })
+        .collect()
+}
+
+/// Choose one candidate index per target:
+/// - Targets in the same `Some(group)` share the exact same `(adapter_high, adapter_low, source_id)`.
+/// - Targets in different groups (or ungrouped `None`) must use distinct `(adapter_high, adapter_low, source_id)`.
+pub fn select_grouped_source_paths(
     candidates_per_target: &[Vec<(i32, u32, u32)>],
+    groups: &[Option<u32>],
 ) -> Option<Vec<usize>> {
+    if candidates_per_target.len() != groups.len() {
+        return None;
+    }
     fn backtrack(
         idx: usize,
         candidates_per_target: &[Vec<(i32, u32, u32)>],
+        groups: &[Option<u32>],
         used_sources: &mut Vec<(i32, u32, u32)>,
+        group_sources: &mut Vec<(u32, (i32, u32, u32))>,
         chosen: &mut Vec<usize>,
     ) -> bool {
         if idx == candidates_per_target.len() {
             return true;
         }
+        let group = groups[idx];
+        let existing_group_key = group.and_then(|g| {
+            group_sources
+                .iter()
+                .find_map(|&(gid, key)| (gid == g).then_some(key))
+        });
         for (choice_idx, &source_key) in candidates_per_target[idx].iter().enumerate() {
-            if used_sources.contains(&source_key) {
-                continue;
+            let mut pushed_used = false;
+            let mut pushed_group = false;
+            match (group, existing_group_key) {
+                (Some(_), Some(required)) => {
+                    if source_key != required {
+                        continue;
+                    }
+                }
+                (Some(g), None) => {
+                    if used_sources.contains(&source_key) {
+                        continue;
+                    }
+                    used_sources.push(source_key);
+                    group_sources.push((g, source_key));
+                    pushed_used = true;
+                    pushed_group = true;
+                }
+                (None, _) => {
+                    if used_sources.contains(&source_key) {
+                        continue;
+                    }
+                    used_sources.push(source_key);
+                    pushed_used = true;
+                }
             }
-            used_sources.push(source_key);
             chosen.push(choice_idx);
-            if backtrack(idx + 1, candidates_per_target, used_sources, chosen) {
+            if backtrack(
+                idx + 1,
+                candidates_per_target,
+                groups,
+                used_sources,
+                group_sources,
+                chosen,
+            ) {
                 return true;
             }
             chosen.pop();
-            used_sources.pop();
+            if pushed_group {
+                group_sources.pop();
+            }
+            if pushed_used {
+                used_sources.pop();
+            }
         }
         false
     }
 
     let mut used = Vec::with_capacity(candidates_per_target.len());
+    let mut group_sources = Vec::new();
     let mut chosen = Vec::with_capacity(candidates_per_target.len());
-    backtrack(0, candidates_per_target, &mut used, &mut chosen).then_some(chosen)
+    backtrack(
+        0,
+        candidates_per_target,
+        groups,
+        &mut used,
+        &mut group_sources,
+        &mut chosen,
+    )
+    .then_some(chosen)
 }
 
 /// Windows requires at least one active source mode at (0, 0). When restoring a
@@ -326,18 +405,66 @@ mod tests {
     }
 
     #[test]
-    fn assigns_distinct_sources_per_adapter_when_restoring_targets() {
-        // Two targets on the same adapter where the first target can only use source 1
-        // or prefers source 0 that conflicts with the second target's only source.
-        let candidates = vec![
+    fn assigns_grouped_and_distinct_sources_when_restoring_targets() {
+        // Extended monitors: each ungrouped target must get a distinct (adapter, source_id).
+        let extended = vec![
             vec![(0, 0x11df5, 0), (0, 0x11df5, 1)],
             vec![(0, 0x11df5, 0)],
             vec![(0, 0x5f4139e9, 0)],
         ];
-        assert_eq!(select_distinct_source_paths(&candidates), Some(vec![1, 0, 0]));
+        assert_eq!(
+            select_grouped_source_paths(&extended, &[None, None, None]),
+            Some(vec![1, 0, 0])
+        );
 
         let impossible = vec![vec![(0, 0x11df5, 0)], vec![(0, 0x11df5, 0)]];
-        assert_eq!(select_distinct_source_paths(&impossible), None);
+        assert_eq!(select_grouped_source_paths(&impossible, &[None, None]), None);
+
+        // Cloned monitors on the same adapter: both targets in group 0 must share one source ID.
+        let cloned = vec![
+            vec![(0, 0x11df5, 0), (0, 0x11df5, 1)],
+            vec![(0, 0x11df5, 0), (0, 0x11df5, 1)],
+        ];
+        assert_eq!(
+            select_grouped_source_paths(&cloned, &[Some(0), Some(0)]),
+            Some(vec![0, 0])
+        );
+
+        // Mixed 3-monitor layout: two cloned targets (group 0) + one extended target (None)
+        // whose only available source is 0 -> cloned pair must both backtrack onto source 1.
+        let mixed = vec![
+            vec![(0, 0x11df5, 0), (0, 0x11df5, 1)],
+            vec![(0, 0x11df5, 0)],
+            vec![(0, 0x11df5, 0), (0, 0x11df5, 1)],
+        ];
+        assert_eq!(
+            select_grouped_source_paths(&mixed, &[Some(0), None, Some(0)]),
+            Some(vec![1, 0, 1])
+        );
+    }
+
+    #[test]
+    fn canonical_source_groups_only_label_shared_clone_sources() {
+        // Solo / extended targets stay None.
+        assert_eq!(
+            canonical_source_groups(&[(0, 0x11df5, 0), (0, 0x11df5, 1)]),
+            vec![None, None]
+        );
+        // Two cloned + one extended.
+        assert_eq!(
+            canonical_source_groups(&[(0, 0x11df5, 1), (0, 0x11df5, 0), (0, 0x11df5, 1)]),
+            vec![Some(0), None, Some(0)]
+        );
+        // Two separate clone pairs get deterministic ascending group IDs.
+        assert_eq!(
+            canonical_source_groups(&[
+                (0, 0x11df5, 2),
+                (0, 0x11df5, 2),
+                (0, 0x11df5, 0),
+                (0, 0x11df5, 0),
+            ]),
+            vec![Some(0), Some(0), Some(1), Some(1)]
+        );
     }
 
     #[test]

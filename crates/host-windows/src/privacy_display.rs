@@ -1,8 +1,8 @@
 use super::privacy_display_plan::{
-    candidate_sort_key, dpi_scale_percent, format_available_target_log, format_call_log,
-    format_display_error, format_indexed_path_log, normalize_origin_positions, normalize_rotation,
-    normalize_scaling, relative_dpi_for_percent, select_distinct_source_paths, ApplyPersistence,
-    AvailableTargetLogInfo, PathLogInfo, PlanStrategy, MODE_IDX_INVALID,
+    candidate_sort_key, canonical_source_groups, dpi_scale_percent, format_available_target_log,
+    format_call_log, format_display_error, format_indexed_path_log, normalize_origin_positions,
+    normalize_rotation, normalize_scaling, relative_dpi_for_percent, select_grouped_source_paths,
+    ApplyPersistence, AvailableTargetLogInfo, PathLogInfo, PlanStrategy, MODE_IDX_INVALID,
 };
 use std::{
     fs::OpenOptions,
@@ -28,6 +28,8 @@ pub struct Target {
     width: u32,
     height: u32,
     rotation: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_group: Option<u32>,
 }
 
 type Result<T> = std::result::Result<T, String>;
@@ -514,7 +516,7 @@ impl Topology {
     }
 
     pub fn targets(&self) -> Result<Vec<Target>> {
-        let mut displays = Vec::new();
+        let mut entries = Vec::new();
         for path in &self.paths {
             let identity = target_identity(path)
                 .ok_or_else(|| "无法识别原显示器，未开启隐私。".to_string())?;
@@ -525,19 +527,39 @@ impl Topology {
                 .filter(|m| m.infoType == DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE)
                 .ok_or("无法记录原显示模式")?;
             let source = unsafe { mode.Anonymous.sourceMode };
-            displays.push(Target {
-                identity,
-                x: source.position.x,
-                y: source.position.y,
-                width: source.width,
-                height: source.height,
-                rotation: path.targetInfo.rotation,
-            });
+            let source_key = (
+                path.sourceInfo.adapterId.HighPart,
+                path.sourceInfo.adapterId.LowPart,
+                path.sourceInfo.id,
+            );
+            entries.push((
+                Target {
+                    identity,
+                    x: source.position.x,
+                    y: source.position.y,
+                    width: source.width,
+                    height: source.height,
+                    rotation: path.targetInfo.rotation,
+                    source_group: None,
+                },
+                source_key,
+            ));
         }
-        displays.sort();
-        if displays.is_empty() {
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        if entries.is_empty() {
             return Err("缺少活动显示器".into());
         }
+        let keys: Vec<_> = entries.iter().map(|(_, key)| *key).collect();
+        let groups = canonical_source_groups(&keys);
+        let mut displays: Vec<Target> = entries
+            .into_iter()
+            .zip(groups)
+            .map(|((mut target, _), group)| {
+                target.source_group = group;
+                target
+            })
+            .collect();
+        displays.sort();
         Ok(displays)
     }
 
@@ -1022,32 +1044,49 @@ fn apply_target_layout(
                 .collect()
         })
         .collect();
-    let chosen = select_distinct_source_paths(&candidate_keys)
-        .ok_or_else(|| "无法为恢复的显示器分配独立源路径".to_string())?;
+    let groups: Vec<Option<u32>> = entries.iter().map(|(t, _)| t.source_group).collect();
+    let chosen = select_grouped_source_paths(&candidate_keys, &groups)
+        .ok_or_else(|| "无法为恢复的显示器分配显示源路径".to_string())?;
     let mut positions: Vec<(i32, i32)> = entries.iter().map(|(t, _)| (t.x, t.y)).collect();
     if normalize_origin {
         normalize_origin_positions(&mut positions);
     }
     let mut paths = Vec::with_capacity(entries.len());
     let mut modes = Vec::with_capacity(entries.len());
+    let mut source_mode_by_key: Vec<((i32, u32, u32), u32)> = Vec::new();
     for (idx, ((target, candidates), &choice)) in entries.iter().zip(&chosen).enumerate() {
-        let mut path = normalized_path_without_target_mode(candidates[choice], idx as u32);
-        path.targetInfo.rotation = normalize_rotation(target.rotation);
-        let mut mode = DISPLAYCONFIG_MODE_INFO::default();
-        mode.infoType = DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE;
-        mode.id = path.sourceInfo.id;
-        mode.adapterId = path.sourceInfo.adapterId;
-        mode.Anonymous.sourceMode = DISPLAYCONFIG_SOURCE_MODE {
-            width: target.width,
-            height: target.height,
-            pixelFormat: DISPLAYCONFIG_PIXELFORMAT_32BPP,
-            position: windows_sys::Win32::Foundation::POINTL {
-                x: positions[idx].0,
-                y: positions[idx].1,
-            },
+        let selected = candidates[choice];
+        let key = (
+            selected.sourceInfo.adapterId.HighPart,
+            selected.sourceInfo.adapterId.LowPart,
+            selected.sourceInfo.id,
+        );
+        let mode_idx = if let Some(&(_, existing_idx)) =
+            source_mode_by_key.iter().find(|&&(k, _)| k == key)
+        {
+            existing_idx
+        } else {
+            let new_idx = modes.len() as u32;
+            let mut mode = DISPLAYCONFIG_MODE_INFO::default();
+            mode.infoType = DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE;
+            mode.id = selected.sourceInfo.id;
+            mode.adapterId = selected.sourceInfo.adapterId;
+            mode.Anonymous.sourceMode = DISPLAYCONFIG_SOURCE_MODE {
+                width: target.width,
+                height: target.height,
+                pixelFormat: DISPLAYCONFIG_PIXELFORMAT_32BPP,
+                position: windows_sys::Win32::Foundation::POINTL {
+                    x: positions[idx].0,
+                    y: positions[idx].1,
+                },
+            };
+            modes.push(mode);
+            source_mode_by_key.push((key, new_idx));
+            new_idx
         };
+        let mut path = normalized_path_without_target_mode(selected, mode_idx);
+        path.targetInfo.rotation = normalize_rotation(target.rotation);
         paths.push(path);
-        modes.push(mode);
     }
     let save = match persistence {
         ApplyPersistence::SaveToDatabase => SDC_SAVE_TO_DATABASE,
@@ -1061,6 +1100,25 @@ fn apply_target_layout(
         SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_APPLY | SDC_ALLOW_CHANGES | save,
     )
     .map_err(|code| format_display_error("restore", code))
+}
+
+/// Check whether every persisted display target is currently available in `QDC_ALL_PATHS`.
+pub fn all_targets_available(wanted: &[Target]) -> bool {
+    if wanted.is_empty() {
+        return false;
+    }
+    let Ok(all) = Topology::query(QDC_ALL_PATHS) else {
+        return false;
+    };
+    let mut available = std::collections::HashSet::new();
+    for path in &all.paths {
+        if path.targetInfo.targetAvailable != 0 {
+            if let Some(id) = target_identity(path) {
+                available.insert(id);
+            }
+        }
+    }
+    wanted.iter().all(|t| available.contains(&t.identity))
 }
 
 /// Rebuild and apply the pre-privacy display layout directly from persisted target identities

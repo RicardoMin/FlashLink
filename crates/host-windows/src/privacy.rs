@@ -32,27 +32,39 @@ use windows_sys::Win32::{
 
 pub const ENGINE_EXIT: u32 = 0xF104;
 pub const MARKER: &str = "privacy-restore.pending";
+pub const DEFERRED_MARKER: &str = "privacy-database-restore.pending";
 const MANUAL: &str = "privacy-local-restore.request";
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct Journal {
     transaction: String,
     targets: Vec<Target>,
 }
 impl Journal {
-    fn read(dir: &Path) -> Result<Self, String> {
-        serde_json::from_slice(&fs::read(dir.join(MARKER)).map_err(|e| e.to_string())?)
+    fn read_from(dir: &Path, name: &str) -> Result<Self, String> {
+        serde_json::from_slice(&fs::read(dir.join(name)).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())
     }
-    fn save(&self, dir: &Path) -> Result<(), String> {
-        let temp = dir.join(format!("privacy-{}.tmp", self.transaction));
+    fn read(dir: &Path) -> Result<Self, String> {
+        Self::read_from(dir, MARKER)
+    }
+    fn save_at(&self, dir: &Path, name: &str) -> Result<(), String> {
+        let temp = dir.join(format!("privacy-{}-{name}.tmp", self.transaction));
+        let _ = fs::remove_file(&temp);
         let mut file = File::create_new(&temp).map_err(|e| e.to_string())?;
         let bytes = serde_json::to_vec(self).map_err(|e| e.to_string())?;
         file.write_all(&bytes)
             .and_then(|_| file.sync_all())
             .map_err(|e| e.to_string())?;
         drop(file);
-        fs::rename(&temp, dir.join(MARKER)).map_err(|e| e.to_string())
+        let dest = dir.join(name);
+        if dest.exists() {
+            fs::remove_file(&dest).map_err(|e| e.to_string())?;
+        }
+        fs::rename(&temp, &dest).map_err(|e| e.to_string())
+    }
+    fn save(&self, dir: &Path) -> Result<(), String> {
+        self.save_at(dir, MARKER)
     }
     fn restored(&self) -> bool {
         Topology::active()
@@ -62,7 +74,20 @@ impl Journal {
     fn clear(&self, dir: &Path) -> Result<(), String> {
         fs::remove_file(dir.join(MARKER)).map_err(|e| e.to_string())?;
         let _ = fs::remove_file(dir.join(MANUAL));
+        if Self::read_from(dir, DEFERRED_MARKER).is_ok_and(|d| d.targets == self.targets) {
+            let _ = fs::remove_file(dir.join(DEFERRED_MARKER));
+        }
         record(dir, "restored");
+        Ok(())
+    }
+    fn defer_database_restore(&self, dir: &Path) -> Result<(), String> {
+        // Persist the deferred Set-A target layout BEFORE clearing MARKER so a crash
+        // between file operations never loses the record needed to clean DB[Set A]
+        // when the unplugged external monitor is reconnected later.
+        self.save_at(dir, DEFERRED_MARKER)?;
+        fs::remove_file(dir.join(MARKER)).map_err(|e| e.to_string())?;
+        let _ = fs::remove_file(dir.join(MANUAL));
+        record(dir, "restored_deferred");
         Ok(())
     }
 }
@@ -135,9 +160,13 @@ fn restore(dir: &Path, journal: &Journal, original: Option<&Topology>) -> Result
                 let _ = privacy_display::restore_database(log_dir);
             }
         }
-        if journal.restored() || (manual && Topology::active().is_ok_and(|s| s.has_physical_output())) {
+        if journal.restored() {
             if reported { privacy_display::log_restore_recovered(dir, manual); }
             return journal.clear(dir);
+        }
+        if manual && Topology::active().is_ok_and(|s| s.has_physical_output()) {
+            if reported { privacy_display::log_restore_recovered(dir, true); }
+            return journal.defer_database_restore(dir);
         }
         if !reported {
             record(dir, "restore_pending");
@@ -548,6 +577,39 @@ pub fn recover_if_abandoned(dir: &Path) -> Result<Option<Child>, String> {
         .map_err(|e| e.to_string())
 }
 
+/// If a previous manual restore completed on a reduced monitor set (e.g. external monitor
+/// unplugged), its full pre-privacy layout is retained in `DEFERRED_MARKER` because Windows
+/// still stores virtual-only for the original monitor set (Set A). Once all original targets
+/// become available again on an unlocked desktop, automatically restore and persist the original
+/// layout back to the CCD database and clear the deferred marker.
+///
+/// Returns `true` when a `SetDisplayConfig` write was attempted so the caller can pace retries.
+pub fn reconcile_deferred_restore(dir: &Path) -> bool {
+    if !dir.join(DEFERRED_MARKER).try_exists().unwrap_or(false) {
+        return false;
+    }
+    if dir.join(MARKER).try_exists().unwrap_or(false) || locked() != Some(false) {
+        return false;
+    }
+    let Ok(deferred) = Journal::read_from(dir, DEFERRED_MARKER) else {
+        return false;
+    };
+    if !privacy_display::all_targets_available(&deferred.targets) {
+        return false;
+    }
+    if deferred.restored() {
+        let _ = fs::remove_file(dir.join(DEFERRED_MARKER));
+        record(dir, "deferred_database_restored");
+        return false;
+    }
+    let _ = privacy_display::restore_targets(Some(dir), &deferred.targets);
+    if deferred.restored() {
+        let _ = fs::remove_file(dir.join(DEFERRED_MARKER));
+        record(dir, "deferred_database_restored");
+    }
+    true
+}
+
 pub fn request_local_restore(dir: &Path) -> Result<(), String> {
     if locked() != Some(false) {
         return Err("请先在电脑本机解锁。".into());
@@ -557,4 +619,42 @@ pub fn request_local_restore(dir: &Path) -> Result<(), String> {
     // The service supervisor owns recovery startup. A running guard sees this journal token
     // on its next poll; no parallel process should contend for its transaction.
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manual_restore_defers_original_set_until_reconnected_and_clears_active_marker() {
+        let dir = std::env::temp_dir().join(format!(
+            "flashlink-deferred-restore-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let legacy_json = br#"{"transaction":"abc123","targets":[{"identity":"a","x":-2560,"y":0,"width":2560,"height":1600,"rotation":1},{"identity":"b","x":0,"y":0,"width":3840,"height":2160,"rotation":1}]}"#;
+        let journal: Journal = serde_json::from_slice(legacy_json).unwrap();
+        journal.save(&dir).unwrap();
+        fs::write(dir.join(MANUAL), &journal.transaction).unwrap();
+        assert!(dir.join(MARKER).exists());
+
+        journal.defer_database_restore(&dir).unwrap();
+        assert!(!dir.join(MARKER).exists());
+        assert!(!dir.join(MANUAL).exists());
+        assert!(dir.join(DEFERRED_MARKER).exists());
+        assert_eq!(Journal::read_from(&dir, DEFERRED_MARKER).unwrap(), journal);
+
+        // A later full restore of the same target set also clears the deferred marker.
+        journal.save(&dir).unwrap();
+        journal.clear(&dir).unwrap();
+        assert!(!dir.join(MARKER).exists());
+        assert!(!dir.join(DEFERRED_MARKER).exists());
+
+        let events = fs::read_to_string(dir.join("privacy-events.log")).unwrap();
+        assert!(events.contains("restored_deferred"));
+        assert!(events.contains("restored\n") || events.ends_with("restored\r\n") || events.ends_with("restored"));
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

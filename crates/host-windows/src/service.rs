@@ -106,6 +106,7 @@ fn wait_for_desktop(
             .map_err(|e| e.to_string())?;
         let state = desktop_state(pending, super::privacy::locked());
         if state == Desktop::Ready {
+            super::privacy::reconcile_deferred_restore(dir);
             return Ok(true);
         }
         if last != Some(state) {
@@ -241,6 +242,7 @@ fn run_engine(
     });
     let mut active: Option<(String, super::lan::Approval, Instant)> = None;
     let mut next_poll = Instant::now();
+    let mut next_deferred = Instant::now();
     let mut failures = 0;
     let mut guard: Option<super::privacy::Guard> = None;
     loop {
@@ -306,6 +308,9 @@ fn run_engine(
                     let result = (|| {
                         if active.is_some() {
                             return Err("请先处理待授权请求。".into());
+                        }
+                        if super::privacy::reconcile_deferred_restore(dir) {
+                            return Err("正在恢复重新接入的原显示器布局，请稍后再切换隐私。".into());
                         }
                         let owner = super::lease::sole_owner(dir)?;
                         let beat = nearby
@@ -373,6 +378,10 @@ fn run_engine(
             if super::lease::sole_owner(dir).ok() != Some(g.owner) {
                 g.finish(dir, "guard_owner_unavailable");
             }
+        } else if Instant::now() >= next_deferred
+            && super::privacy::reconcile_deferred_restore(dir)
+        {
+            next_deferred = Instant::now() + Duration::from_millis(1500);
         }
         let pending = match api.pending() {
             Ok(p) => {
