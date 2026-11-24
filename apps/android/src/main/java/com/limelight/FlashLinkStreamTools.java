@@ -27,7 +27,7 @@ final class FlashLinkStreamTools {
     private final FrameLayout layer;
     private final LinearLayout panel;
     private final ScrollView sheet;
-    private TextView mouseTab, toolsTab, dragButton;
+    private TextView mouseTab, modeTab, toolsTab, dragButton;
     private boolean mouseOpen, drag;
     private float lastX, lastY;
     private int trackingPointer = -1;
@@ -42,8 +42,13 @@ final class FlashLinkStreamTools {
 
     void attach() {
         game.addContentView(layer, new FrameLayout.LayoutParams(MATCH, MATCH));
-        mouseTab = tab("鼠标", Gravity.START, () -> toggle(true));
-        toolsTab = tab("工具", Gravity.END, () -> toggle(false));
+        mouseTab = tab("鼠标", Gravity.START, 56, () -> toggle(true));
+        modeTab = tab("", Gravity.CENTER_HORIZONTAL, 96, () -> {
+            game.toggleTouchMode();
+            updateModeTab();
+        });
+        updateModeTab();
+        toolsTab = tab("工具", Gravity.END, 56, () -> toggle(false));
         sheet.setBackground(shape(0xeb172332, 16));
         sheet.setFillViewport(false);
         sheet.setVisibility(View.GONE);
@@ -54,10 +59,16 @@ final class FlashLinkStreamTools {
         layer.addView(sheet);
     }
 
-    private TextView tab(String label, int edge, Runnable action) {
+    private void updateModeTab() {
+        boolean trackpad = game.isTouchscreenTrackpad();
+        modeTab.setText(trackpad ? "触控板模式" : "直接触控");
+        modeTab.setContentDescription(trackpad ? "触控板模式，点按切换为直接触控" : "直接触控，点按切换为触控板模式");
+    }
+
+    private TextView tab(String label, int edge, int width, Runnable action) {
         TextView v = button(label, action);
         v.setBackground(shape(0xbf192635, 24));
-        FrameLayout.LayoutParams p = new FrameLayout.LayoutParams(dp(56), dp(42), Gravity.TOP | edge);
+        FrameLayout.LayoutParams p = new FrameLayout.LayoutParams(dp(width), dp(42), Gravity.TOP | edge);
         p.setMargins(dp(12), dp(12), dp(12), 0);
         layer.addView(v, p);
         return v;

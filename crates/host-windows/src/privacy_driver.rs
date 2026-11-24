@@ -194,7 +194,7 @@ fn register(inf: &Path) -> io::Result<bool> {
         Ok(reboot != 0)
     }
 }
-const DEFAULT_SETTINGS: &str = include_str!("../../../packaging/windows/mttvdd/vdd_settings.xml");
+const DEFAULT_SETTINGS: &str = include_str!("../assets/mttvdd/vdd_settings.xml");
 
 // Only the installer writes the protected settings file. A new monitor can be
 // added by running the same installer again, without replacing the signed driver.
@@ -282,22 +282,10 @@ pub fn install() -> io::Result<String> {
         return Ok("虚拟屏已安装。".into());
     }
     const FILES: &[(&str, &[u8])] = &[
-        (
-            "MttVDD.inf",
-            include_bytes!("../../../packaging/windows/mttvdd/MttVDD.inf"),
-        ),
-        (
-            "MttVDD.dll",
-            include_bytes!("../../../packaging/windows/mttvdd/MttVDD.dll"),
-        ),
-        (
-            "mttvdd.cat",
-            include_bytes!("../../../packaging/windows/mttvdd/mttvdd.cat"),
-        ),
-        (
-            "LICENSE",
-            include_bytes!("../../../packaging/windows/mttvdd/LICENSE"),
-        ),
+        ("MttVDD.inf", include_bytes!("../assets/mttvdd/MttVDD.inf")),
+        ("MttVDD.dll", include_bytes!("../assets/mttvdd/MttVDD.dll")),
+        ("mttvdd.cat", include_bytes!("../assets/mttvdd/mttvdd.cat")),
+        ("LICENSE", include_bytes!("../assets/mttvdd/LICENSE")),
     ];
     for (name, data) in FILES {
         let path = dir.join(name);

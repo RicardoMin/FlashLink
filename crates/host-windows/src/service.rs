@@ -163,22 +163,15 @@ fn run_engine(
     let engine_dir = engine.parent().ok_or("引擎目录无效")?;
     let program_data = env::var_os("ProgramData").map(PathBuf::from);
     check_recovery_files(engine_dir, program_data.as_deref())?;
-    let mut profile = Profile::prepare(dir, base)
+    let profile = Profile::prepare(dir, base)
         .map_err(|e| format!("无法打开主机配置。请确认 FlashLink 只运行了一次。\r\n{e}"))?;
     let cert = dir.join("flashlink-cert.pem");
     let key = dir.join("flashlink-key.pem");
-    let auth = dir.join("flashlink-gui-auth.json");
-    let creds = Credentials::create(&auth)?;
+    let creds = Credentials::create(&profile.auth)?;
     let name = env::var("COMPUTERNAME")
         .ok()
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| "FlashLink PC".into());
-    profile
-        .overrides
-        .retain(|v| !v.starts_with("credentials_file="));
-    profile
-        .overrides
-        .push(format!("credentials_file={}", auth.display()));
     let job = KillOnClose::new().map_err(|e| format!("创建进程管理器失败：{e}"))?;
     profile.remember_stream_log();
     let mut child = Command::new(engine)

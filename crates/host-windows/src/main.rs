@@ -123,7 +123,10 @@ fn ready(base: u16) -> io::Result<bool> {
         .write_all(b"GET /serverinfo HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n")?;
     let mut body = String::new();
     stream.take(32 * 1024).read_to_string(&mut body)?;
-    Ok(body.contains("<hostname>FlashLink Demo</hostname>") && local_connection(base + 1).is_ok())
+    Ok(
+        body.contains(&format!("<hostname>{}</hostname>", profile::ENGINE_NAME))
+            && local_connection(base + 1).is_ok(),
+    )
 }
 
 #[cfg(windows)]

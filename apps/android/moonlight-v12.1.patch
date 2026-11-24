@@ -2,12 +2,13 @@ diff --git a/app/build.gradle b/app/build.gradle
 index 9d13f4b..d04243e 100644
 --- a/app/build.gradle
 +++ b/app/build.gradle
-@@ -1,18 +1,19 @@
+@@ -1,18 +1,20 @@
  apply plugin: 'com.android.application'
  
  android {
 -    ndkVersion "23.2.8568313"
 +    ndkVersion project.property("flashlinkNdkVersion")
++    sourceSets.main.java.srcDir(project.property("flashlinkJavaSrc"))
  
 -    compileSdk 34
 +    compileSdk 36
@@ -413,3 +414,292 @@ index 15de902..5c82cb0 100644
 +distributionUrl=https\://services.gradle.org/distributions/gradle-8.14-bin.zip
  zipStoreBase=GRADLE_USER_HOME
  zipStorePath=wrapper/dists
+diff --git a/app/src/main/java/com/limelight/Game.java b/app/src/main/java/com/limelight/Game.java
+index 42bc0c7..7f44305 100644
+--- a/app/src/main/java/com/limelight/Game.java
++++ b/app/src/main/java/com/limelight/Game.java
+@@ -96,7 +96,8 @@ public class Game extends Activity implements SurfaceHolder.Callback,
+
+     // Only 2 touches are supported
+     private final TouchContext[] touchContextMap = new TouchContext[2];
+-    private long threeFingerDownTime = 0;
++    private long threeFingerDownTime = -1;
++    private boolean waitForFingerDown = true;
+
+     private static final int REFERENCE_HORIZ_RES = 1280;
+     private static final int REFERENCE_VERT_RES = 720;
+@@ -494,17 +495,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
+         InputManager inputManager = (InputManager) getSystemService(Context.INPUT_SERVICE);
+         inputManager.registerInputDeviceListener(keyboardTranslator, null);
+
+-        // Initialize touch contexts
+-        for (int i = 0; i < touchContextMap.length; i++) {
+-            if (!prefConfig.touchscreenTrackpad) {
+-                touchContextMap[i] = new AbsoluteTouchContext(conn, i, streamView);
+-            }
+-            else {
+-                touchContextMap[i] = new RelativeTouchContext(conn, i,
+-                        REFERENCE_HORIZ_RES, REFERENCE_VERT_RES,
+-                        streamView, prefConfig);
+-            }
+-        }
++        setTouchscreenTrackpad(prefConfig.touchscreenTrackpad);
+
+         if (prefConfig.onscreenController) {
+             // create virtual onscreen controller
+@@ -1186,6 +1177,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
+             }
+         }
+         else {
++            cancelTouchscreenInput();
+             inputCaptureProvider.disableCapture();
+         }
+
+@@ -1502,6 +1494,43 @@ public class Game extends Activity implements SurfaceHolder.Callback,
+         return true;
+     }
+
++    protected final boolean isTouchscreenTrackpad() {
++        return prefConfig.touchscreenTrackpad;
++    }
++
++    protected final void setTouchscreenTrackpad(boolean enabled) {
++        cancelTouchscreenInput();
++        prefConfig.touchscreenTrackpad = enabled;
++        for (int i = 0; i < touchContextMap.length; i++) {
++            if (!prefConfig.touchscreenTrackpad) {
++                touchContextMap[i] = new AbsoluteTouchContext(conn, i, streamView);
++            }
++            else {
++                touchContextMap[i] = new RelativeTouchContext(conn, i,
++                        REFERENCE_HORIZ_RES, REFERENCE_VERT_RES,
++                        streamView, prefConfig);
++            }
++        }
++    }
++
++    protected final void cancelTouchscreenInput() {
++        waitForFingerDown = true;
++        threeFingerDownTime = -1;
++        for (TouchContext context : touchContextMap) {
++            if (context != null) {
++                context.cancelTouch();
++                context.setPointerCount(0);
++            }
++        }
++        onTouchscreenCancelled();
++    }
++
++    protected void onTouchscreenCancelled() {}
++
++    protected boolean handleDirectFingerTouch(View source, View video, MotionEvent event, NvConnection connection) {
++        return false;
++    }
++
+     private TouchContext getTouchContext(int actionIndex)
+     {
+         if (actionIndex < touchContextMap.length) {
+@@ -2015,6 +2044,39 @@ public class Game extends Activity implements SurfaceHolder.Callback,
+                     return true;
+                 }
+
++                int action = event.getActionMasked();
++                if (action == MotionEvent.ACTION_DOWN) {
++                    waitForFingerDown = false;
++                    threeFingerDownTime = -1;
++                }
++                if (threeFingerDownTime >= 0) {
++                    if (action == MotionEvent.ACTION_CANCEL || event.getPointerCount() > 3 ||
++                            (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
++                                    (event.getFlags() & MotionEvent.FLAG_CANCELED) != 0)) {
++                        threeFingerDownTime = -1;
++                    }
++                    else if (action == MotionEvent.ACTION_UP) {
++                        if (event.getEventTime() - threeFingerDownTime < THREE_FINGER_TAP_THRESHOLD) {
++                            toggleKeyboard();
++                        }
++                        threeFingerDownTime = -1;
++                    }
++                    return true;
++                }
++                if (waitForFingerDown) {
++                    return true;
++                }
++                if (action == MotionEvent.ACTION_POINTER_DOWN && event.getPointerCount() == 3) {
++                    cancelTouchscreenInput();
++                    threeFingerDownTime = event.getEventTime();
++                    return true;
++                }
++                if (!prefConfig.touchscreenTrackpad && view != null &&
++                        event.isFromSource(InputDevice.SOURCE_TOUCHSCREEN) &&
++                        handleDirectFingerTouch(view, streamView, event, conn)) {
++                    return true;
++                }
++
+                 // If this is the parent view, we'll offset our coordinates to appear as if they
+                 // are relative to the StreamView like our StreamView touch events are.
+                 float xOffset, yOffset;
+@@ -2032,21 +2094,6 @@ public class Game extends Activity implements SurfaceHolder.Callback,
+                 int eventX = (int)(event.getX(actionIndex) + xOffset);
+                 int eventY = (int)(event.getY(actionIndex) + yOffset);
+
+-                // Special handling for 3 finger gesture
+-                if (event.getActionMasked() == MotionEvent.ACTION_POINTER_DOWN &&
+-                        event.getPointerCount() == 3) {
+-                    // Three fingers down
+-                    threeFingerDownTime = event.getEventTime();
+-
+-                    // Cancel the first and second touches to avoid
+-                    // erroneous events
+-                    for (TouchContext aTouchContext : touchContextMap) {
+-                        aTouchContext.cancelTouch();
+-                    }
+-
+-                    return true;
+-                }
+-
+                 // TODO: Re-enable native touch when have a better solution for handling
+                 // cancelled touches from Android gestures and 3 finger taps to activate
+                 // the software keyboard.
+@@ -2072,16 +2119,6 @@ public class Game extends Activity implements SurfaceHolder.Callback,
+                     break;
+                 case MotionEvent.ACTION_POINTER_UP:
+                 case MotionEvent.ACTION_UP:
+-                    if (event.getPointerCount() == 1 &&
+-                            (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU || (event.getFlags() & MotionEvent.FLAG_CANCELED) == 0)) {
+-                        // All fingers up
+-                        if (event.getEventTime() - threeFingerDownTime < THREE_FINGER_TAP_THRESHOLD) {
+-                            // This is a 3 finger tap to bring up the keyboard
+-                            toggleKeyboard();
+-                            return true;
+-                        }
+-                    }
+-
+                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && (event.getFlags() & MotionEvent.FLAG_CANCELED) != 0) {
+                         context.cancelTouch();
+                     }
+diff --git a/app/src/main/java/com/limelight/binding/input/touch/RelativeTouchContext.java b/app/src/main/java/com/limelight/binding/input/touch/RelativeTouchContext.java
+index 7ed8f09..22b65c8 100644
+--- a/app/src/main/java/com/limelight/binding/input/touch/RelativeTouchContext.java
++++ b/app/src/main/java/com/limelight/binding/input/touch/RelativeTouchContext.java
+@@ -50,39 +50,13 @@ public class RelativeTouchContext implements TouchContext {
+         }
+     };
+
+-    // Indexed by MouseButtonPacket.BUTTON_XXX - 1
+-    private final Runnable[] buttonUpRunnables = new Runnable[] {
+-            new Runnable() {
+-                @Override
+-                public void run() {
+-                    conn.sendMouseButtonUp(MouseButtonPacket.BUTTON_LEFT);
+-                }
+-            },
+-            new Runnable() {
+-                @Override
+-                public void run() {
+-                    conn.sendMouseButtonUp(MouseButtonPacket.BUTTON_MIDDLE);
+-                }
+-            },
+-            new Runnable() {
+-                @Override
+-                public void run() {
+-                    conn.sendMouseButtonUp(MouseButtonPacket.BUTTON_RIGHT);
+-                }
+-            },
+-            new Runnable() {
+-                @Override
+-                public void run() {
+-                    conn.sendMouseButtonUp(MouseButtonPacket.BUTTON_X1);
+-                }
+-            },
+-            new Runnable() {
+-                @Override
+-                public void run() {
+-                    conn.sendMouseButtonUp(MouseButtonPacket.BUTTON_X2);
+-                }
+-            }
+-    };
++    private boolean tapPressed;
++    private final Runnable releaseTap = this::releaseTap;
++
++    private void releaseTap() {
++        tapPressed = false;
++        conn.sendMouseButtonUp(getMouseButtonIndex());
++    }
+
+     private static final int TAP_MOVEMENT_THRESHOLD = 20;
+     private static final int TAP_DISTANCE_THRESHOLD = 25;
+@@ -184,6 +158,7 @@ public class RelativeTouchContext implements TouchContext {
+
+         if (confirmedDrag) {
+             // Raise the button after a drag
++            confirmedDrag = false;
+             conn.sendMouseButtonUp(buttonIndex);
+         }
+         else if (isTap(eventTime))
+@@ -193,9 +168,9 @@ public class RelativeTouchContext implements TouchContext {
+
+             // Release the mouse button in 100ms to allow for apps that use polling
+             // to detect mouse button presses.
+-            Runnable buttonUpRunnable = buttonUpRunnables[buttonIndex - 1];
+-            handler.removeCallbacks(buttonUpRunnable);
+-            handler.postDelayed(buttonUpRunnable, 100);
++            tapPressed = true;
++            handler.removeCallbacks(releaseTap);
++            handler.postDelayed(releaseTap, 100);
+         }
+     }
+
+@@ -309,8 +284,12 @@ public class RelativeTouchContext implements TouchContext {
+         // Cancel the drag timer
+         cancelDragTimer();
+
+-        // If it was a confirmed drag, we'll need to raise the button now
++        if (tapPressed) {
++            handler.removeCallbacks(releaseTap);
++            releaseTap();
++        }
+         if (confirmedDrag) {
++            confirmedDrag = false;
+             conn.sendMouseButtonUp(getMouseButtonIndex());
+         }
+     }
+diff --git a/app/src/main/java/com/limelight/preferences/PreferenceConfiguration.java b/app/src/main/java/com/limelight/preferences/PreferenceConfiguration.java
+index e0ba76e..44b7707 100644
+--- a/app/src/main/java/com/limelight/preferences/PreferenceConfiguration.java
++++ b/app/src/main/java/com/limelight/preferences/PreferenceConfiguration.java
+@@ -57,7 +57,7 @@ public class PreferenceConfiguration {
+     private static final String VIBRATE_FALLBACK_PREF_STRING = "checkbox_vibrate_fallback";
+     private static final String VIBRATE_FALLBACK_STRENGTH_PREF_STRING = "seekbar_vibrate_fallback_strength";
+     private static final String FLIP_FACE_BUTTONS_PREF_STRING = "checkbox_flip_face_buttons";
+-    private static final String TOUCHSCREEN_TRACKPAD_PREF_STRING = "checkbox_touchscreen_trackpad";
++    public static final String TOUCHSCREEN_TRACKPAD_PREF_STRING = "flashlink_touchscreen_trackpad";
+     private static final String LATENCY_TOAST_PREF_STRING = "checkbox_enable_post_stream_toast";
+     private static final String FRAME_PACING_PREF_STRING = "frame_pacing";
+     private static final String ABSOLUTE_MOUSE_MODE_PREF_STRING = "checkbox_absolute_mouse_mode";
+@@ -95,7 +95,7 @@ public class PreferenceConfiguration {
+     private static final boolean DEFAULT_VIBRATE_FALLBACK = false;
+     private static final int DEFAULT_VIBRATE_FALLBACK_STRENGTH = 100;
+     private static final boolean DEFAULT_FLIP_FACE_BUTTONS = false;
+-    private static final boolean DEFAULT_TOUCHSCREEN_TRACKPAD = true;
++    private static final boolean DEFAULT_TOUCHSCREEN_TRACKPAD = false;
+     private static final String DEFAULT_AUDIO_CONFIG = "2"; // Stereo
+     private static final boolean DEFAULT_LATENCY_TOAST = false;
+     private static final String DEFAULT_FRAME_PACING = "latency";
+diff --git a/app/src/main/res/xml/preferences.xml b/app/src/main/res/xml/preferences.xml
+index d68c8c5..b635a90 100644
+--- a/app/src/main/res/xml/preferences.xml
++++ b/app/src/main/res/xml/preferences.xml
+@@ -130,10 +130,10 @@
+     <PreferenceCategory android:title="@string/category_input_settings"
+         android:key="category_input_settings">
+         <CheckBoxPreference
+-            android:key="checkbox_touchscreen_trackpad"
++            android:key="flashlink_touchscreen_trackpad"
+             android:title="@string/title_checkbox_touchscreen_trackpad"
+             android:summary="@string/summary_checkbox_touchscreen_trackpad"
+-            android:defaultValue="true" />
++            android:defaultValue="false" />
+         <CheckBoxPreference
+             android:key="checkbox_mouse_nav_buttons"
+             android:title="@string/title_checkbox_mouse_nav_buttons"

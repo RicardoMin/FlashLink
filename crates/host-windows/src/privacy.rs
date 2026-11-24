@@ -74,9 +74,6 @@ impl Journal {
     fn clear(&self, dir: &Path) -> Result<(), String> {
         fs::remove_file(dir.join(MARKER)).map_err(|e| e.to_string())?;
         let _ = fs::remove_file(dir.join(MANUAL));
-        if Self::read_from(dir, DEFERRED_MARKER).is_ok_and(|d| d.targets == self.targets) {
-            let _ = fs::remove_file(dir.join(DEFERRED_MARKER));
-        }
         record(dir, "restored");
         Ok(())
     }
@@ -597,14 +594,12 @@ pub fn reconcile_deferred_restore(dir: &Path) -> bool {
     if !privacy_display::all_targets_available(&deferred.targets) {
         return false;
     }
-    if deferred.restored() {
-        let _ = fs::remove_file(dir.join(DEFERRED_MARKER));
-        record(dir, "deferred_database_restored");
-        return false;
-    }
-    let _ = privacy_display::restore_targets(Some(dir), &deferred.targets);
-    if deferred.restored() {
-        let _ = fs::remove_file(dir.join(DEFERRED_MARKER));
+    // An active layout can be transient. Only retire the journal after a full
+    // persistent write succeeds and Windows reports the expected targets.
+    if matches!(privacy_display::restore_targets(Some(dir), &deferred.targets), Ok(true))
+        && deferred.restored()
+        && fs::remove_file(dir.join(DEFERRED_MARKER)).is_ok()
+    {
         record(dir, "deferred_database_restored");
     }
     true
@@ -646,11 +641,11 @@ mod tests {
         assert!(dir.join(DEFERRED_MARKER).exists());
         assert_eq!(Journal::read_from(&dir, DEFERRED_MARKER).unwrap(), journal);
 
-        // A later full restore of the same target set also clears the deferred marker.
+        // Clearing the active transaction alone does not confirm a database write.
         journal.save(&dir).unwrap();
         journal.clear(&dir).unwrap();
         assert!(!dir.join(MARKER).exists());
-        assert!(!dir.join(DEFERRED_MARKER).exists());
+        assert!(dir.join(DEFERRED_MARKER).exists());
 
         let events = fs::read_to_string(dir.join("privacy-events.log")).unwrap();
         assert!(events.contains("restored_deferred"));

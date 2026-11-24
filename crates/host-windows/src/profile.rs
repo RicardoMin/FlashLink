@@ -2,11 +2,13 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+pub const ENGINE_NAME: &str = "FlashLink";
 const APPS: &str = r#"{"env":{},"apps":[{"name":"Desktop","image-path":"desktop.png"}]}"#;
 
 pub struct Profile {
     pub config: PathBuf,
     pub log: PathBuf,
+    pub auth: PathBuf,
     pub overrides: Vec<String>,
     _lock: File,
 }
@@ -55,17 +57,20 @@ impl Profile {
                 directory.display()
             ))
         })?;
+        // Keep the profile filenames shared with earlier versions and the same instance lock.
         let config = directory.join("flashlink-demo.conf");
+        let auth = directory.join("flashlink-gui-auth.json");
         let log = directory.join("flashlink-sunshine.log");
         create_if_missing(
             &config,
-            b"# FlashLink managed demo. The launcher supplies per-run settings.\n",
+            b"# FlashLink managed profile. The launcher supplies per-run settings.\n",
         )?;
         create_if_missing(&directory.join("flashlink-apps.json"), APPS.as_bytes())?;
 
         let mut overrides = vec![
             format!("port={port}"),
-            "sunshine_name=FlashLink Demo".to_string(),
+            format!("sunshine_name={ENGINE_NAME}"),
+            format!("credentials_file={}", auth.display()),
             "origin_web_ui_allowed=pc".to_string(),
             "lan_encryption_mode=2".to_string(),
             "wan_encryption_mode=2".to_string(),
@@ -78,11 +83,10 @@ impl Profile {
             "nvenc_opengl_vulkan_on_dxgi=disabled".to_string(),
         ];
         // Sunshine resolves relative paths under its installation directory's config folder.
-        // Keep state, identity and credentials under this Windows user's demo directory.
+        // Keep state, identity and credentials under this Windows user's profile directory.
         for (key, name) in [
             ("file_apps", "flashlink-apps.json"),
             ("file_state", "flashlink-state.json"),
-            ("credentials_file", "flashlink-state.json"),
             ("pkey", "flashlink-key.pem"),
             ("cert", "flashlink-cert.pem"),
             ("log_path", "flashlink-sunshine.log"),
@@ -92,6 +96,7 @@ impl Profile {
         Ok(Self {
             config,
             log,
+            auth,
             overrides,
             _lock: lock,
         })
@@ -150,6 +155,9 @@ mod tests {
         ));
         let profile = Profile::prepare(&root, 47989).unwrap();
         assert!(profile.config.is_file());
+        assert!(profile
+            .overrides
+            .contains(&format!("credentials_file={}", profile.auth.display())));
         assert_eq!(profile.log, root.join("flashlink-sunshine.log"));
         assert!(profile
             .overrides

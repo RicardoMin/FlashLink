@@ -9,8 +9,6 @@
 ![Platforms](https://img.shields.io/badge/Platforms-Windows%20%7C%20Android%20%7C%20iPadOS%20%7C%20macOS-orange)
 ![License](https://img.shields.io/badge/License-MIT-blue)
 
-**当前试玩版 `0.3.0-demo`** 支持安卓手机或平板在同一局域网内连接 Windows x64。首次授权在电脑上完成，以后点设备卡即可直连。安卓提供游戏内鼠标、键盘及短时重连。Windows 内置虚拟屏组件、隐私模式和本机测试报告导出，物理黑屏与恢复等待真机验收。下文包含后续规划，当前版本的安装步骤和实现见[使用说明](docs/usage.md)和[项目架构](docs/architecture.md)。
-
 ***
 
 ## 💡 项目简介

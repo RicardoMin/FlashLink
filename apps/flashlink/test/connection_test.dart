@@ -46,6 +46,7 @@ class FakePlayer implements Player {
   int scans = 0;
   int settingsCount = 0;
   Object? fail;
+  Completer<List<NearbyDevice>>? pendingScan;
   List<NearbyDevice> devices = [device];
   @override
   Future<void> openSettings() async => settingsCount++;
@@ -54,6 +55,7 @@ class FakePlayer implements Player {
   Future<List<NearbyDevice>> discover() async {
     scans++;
     if (fail case final err?) throw err;
+    if (pendingScan case final pending?) return pending.future;
     return devices;
   }
 
@@ -67,6 +69,26 @@ class FakePlayer implements Player {
 }
 
 void main() {
+  test('overlapping refreshes wait for the same discovery result', () async {
+    final scan = Completer<List<NearbyDevice>>();
+    final player = FakePlayer()..pendingScan = scan;
+    final controller = ConnectionController(FakeCore.new, player);
+    addTearDown(controller.dispose);
+
+    final automatic = controller.discover();
+    var refreshed = false;
+    final manual = controller.discover().then((_) => refreshed = true);
+    await Future<void>.value();
+    expect(refreshed, isFalse);
+    expect(controller.scanning, isTrue);
+    expect(player.scans, 1);
+    scan.complete([device]);
+    await manual;
+    expect(controller.nearby, [device]);
+    expect(controller.scanning, isFalse);
+    await automatic;
+  });
+
   test('lost device cannot launch and discovery failure does not imply offline',
       () async {
     final core = FakeCore();
@@ -108,7 +130,6 @@ void main() {
       await tester.pumpWidget(FlashLinkApp(controller: controller));
       await tester.pumpAndSettle();
       expect(player.scans, 1);
-      expect(find.byType(TextField), findsNothing);
       expect(find.text('在线设备 1'), findsOneWidget);
       await tester.tap(find.text('书房电脑').first);
       await tester.pump();
@@ -133,6 +154,26 @@ void main() {
     });
   }
 
+  testWidgets('pairing errors are shown once without leaking into settings',
+      (tester) async {
+    final player = FakePlayer();
+    final controller = ConnectionController(FakeCore.new, player);
+    addTearDown(controller.dispose);
+    await tester.pumpWidget(FlashLinkApp(controller: controller));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text(device.name).first);
+    player.exit
+        .completeError(PlatformException(code: 'denied', message: '配对被拒绝'));
+    await tester.pumpAndSettle();
+    expect(find.widgetWithText(SnackBar, '配对被拒绝'), findsOneWidget);
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('设置'));
+    await tester.pumpAndSettle();
+    expect(find.text('配对被拒绝'), findsNothing);
+    expect(find.text('播放设置'), findsOneWidget);
+  });
+
   testWidgets('foreground refresh and manual refresh repair discovery failures',
       (tester) async {
     final player = FakePlayer()..fail = PlatformException(code: 'no_wifi');
@@ -153,6 +194,13 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('书房电脑'), findsWidgets);
     expect(player.scans, 3);
+    await tester.tap(find.text('连接帮助'));
+    await tester.pumpAndSettle();
+    await tester.pump(const Duration(seconds: 20));
+    expect(player.scans, 3);
+    await tester.tap(find.text('我的设备'));
+    await tester.pumpAndSettle();
+    expect(player.scans, 4);
   });
   testWidgets('device details follow a lost host and filter hides missing rows',
       (tester) async {
