@@ -8,6 +8,8 @@ FlashLink modifications, 2026-11-23: use a separate application ID and Flutter l
 open the host selected in FlashLink, request encrypted streams, and package the Rust
 manager in the Android arm64 build. The FlashLink session shell adds trusted-device
 reconnection, in-stream touch controls and aggregate performance measurements. Modified native files retain their upstream license.
+2026-11-24: adapt Moonlight's Game touch routing, trackpad button release and
+input preference to support switching between direct touch and trackpad during a stream.
 This integration is built by apps/android/build.py and apps/android/moonlight-v12.1.patch.
 Distributors of the combined APK should provide the complete corresponding source
 and build scripts for the exact binary with the distribution.

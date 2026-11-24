@@ -6,8 +6,8 @@
 
 | 设备 | 系统要求 | 应用文件 |
 | --- | --- | --- |
-| 被控电脑 | Windows 10/11 x64，已登录且桌面解锁 | `FlashLink-Windows-x64.exe` |
-| 手机或平板 | Android 7.0 及以上，arm64 | `FlashLink-Android-arm64.apk` |
+| 被控电脑 | Windows 10/11 x64，已登录且桌面解锁 | [Windows 单文件 EXE](../install/FlashLink-Windows-x64.exe?raw=true) 或 [便携 ZIP](../install/FlashLink-Windows-x64.zip?raw=true) |
+| 手机或平板 | Android 7.0 及以上，arm64 | [Android 测试 APK](../install/FlashLink-Android-arm64.apk?raw=true) |
 
 将 EXE 和 APK 分别复制到对应设备。Windows 单文件应用内含 Sunshine，安卓应用内含 Moonlight。若使用 Windows 便携 ZIP，请先完整解压，再双击其中的 `FlashLink.exe`。从 Git 克隆项目的开发者可以按下方步骤生成安装包。
 
@@ -20,6 +20,10 @@
 下次打开两端应用，点同一张设备卡即可直连。主窗口关闭后会驻留托盘；点托盘图标可重新打开。要停止服务，选「主机 → 退出主机」。在「管理已授权设备」中选择设备并确认，可立即结束该设备的连接并移除授权。
 
 ## 串流中的操作
+
+安卓默认使用「直接触控」。轻点视频中的按钮，远程鼠标会在对应位置单击左键。长按目标可单击右键；两指一起上下滑动可滚动页面。视频黑边不响应直接点击。
+
+点串流顶部中央的「直接触控」可切换到「触控板模式」。此时在画面上滑动会从鼠标当前位置移动指针，再点同一按钮即可恢复直接触控。切换在当前串流生效，下次连接会记住选择。
 
 在远程桌面顶部点「鼠标」展开触控板、左中右键和上下滚动。点「拖动」后移动指针，再点一次释放。点「工具」可以发送空格、回车等快捷键，输入一段文字，或主动断开。
 
@@ -51,7 +55,7 @@
 python3 test/test_flashlink.py --mode dev
 ```
 
-这个命令运行 Rust、Flutter 和 Android 重连策略测试，将一份带时间的 JSON 写入 `testdata/`。单元测试无需 Windows、安卓设备或模拟器。
+这个命令运行 Rust、Flutter 和 Android 的重连、触控手势测试，将一份带时间的 JSON 写入 `testdata/`。单元测试无需 Windows、安卓设备或模拟器。
 
 将开过串流的安卓设备通过 USB 接到 Mac，允许 USB 调试，在 Mac 准备好 Android Platform Tools 后，运行以下命令。它读取最近串流的重连事件、接收和提交到 Surface 的帧数、丢帧及解码耗时。静态桌面上的数字受画面变化影响，评估 60/120 FPS 请播放有持续运动的素材。可以通过环境变量 `ADB` 指定可执行文件；多设备时用 `ANDROID_SERIAL` 选择设备。
 
@@ -65,7 +69,7 @@ python3 test/test_flashlink.py --mode field --android
 
 ## 从源码构建
 
-以下命令均从仓库根目录执行。首次构建需要联网获取上游源码和构建依赖。
+以下命令均从仓库根目录执行。首次构建需要联网获取上游源码和构建依赖。修改应用后，运行受影响平台的默认打包命令，将更新的 [install 测试包](../install/) 和对应源码放进同一个 PR。安卓测试包沿用同一签名，方便已有设备覆盖安装并保留配对数据。两端的第三方组件版本、许可证和源码入口见 [Android 声明](../apps/android/NOTICE.txt) 和 [Windows 声明](../crates/host-windows/assets/NOTICE.txt)。
 
 ### Windows 被控端
 
@@ -76,7 +80,7 @@ cargo build --locked --release -p flashlink-host
 python crates/host-windows/bundle.py --exe target/release/flashlink-host.exe --sunshine-zip "$env:USERPROFILE\Downloads\Sunshine-Windows-AMD64-lite.zip" --sunshine-license "$env:USERPROFILE\Downloads\Sunshine-LICENSE"
 ```
 
-打包脚本核验 Sunshine 的 SHA-256 后生成 `dist/FlashLink-Windows-x64.exe` 和 `dist/FlashLink-Windows-x64.zip`。
+打包脚本核验 Sunshine 的 SHA-256 后生成单文件 EXE 和便携 ZIP，默认同步到 `install/`，并保留 `dist/` 中的构建副本。
 
 ### Android 控制端
 
@@ -87,4 +91,4 @@ rustup target add aarch64-linux-android
 python3 apps/android/build.py
 ```
 
-把生成的 `build/android/flashlink-arm64-debug.apk` 安装到安卓设备。可在系统的应用信息中核对版本 `0.3.0-demo`（316）。[Android 构建脚本](../apps/android/build.py)
+默认构建成功后，APK 会写入 `install/FlashLink-Android-arm64.apk`，并保留 `build/android/flashlink-arm64-debug.apk`。两端的打包命令均可使用 `--output` 指定独立输出位置，用于本地试验。[Android 构建脚本](../apps/android/build.py)

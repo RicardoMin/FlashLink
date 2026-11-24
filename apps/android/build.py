@@ -96,6 +96,15 @@ def check_flutter_payload(compiler, aar, apk):
     print(f"Flutter AAR/APK build ID: {ids[0]}")
 
 
+def copy_apk(source, destination):
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=destination.parent) as staging:
+        ready = Path(staging) / destination.name
+        shutil.copy2(source, ready)
+        ready.replace(destination)
+    print(f"APK: {destination}")
+
+
 def build(output, host):
     compiler, version = android_ndk()
     run(["git", "submodule", "update", "--init", "--recursive"], host)
@@ -127,8 +136,8 @@ def build(output, host):
             raise ValueError("Incomplete APK. Missing native libraries: " + ", ".join(missing))
         check_flutter_payload(compiler, aar, package)
     destination = output / "flashlink-arm64-debug.apk"
-    shutil.copy2(apk, destination)
-    print(f"APK: {destination}")
+    copy_apk(apk, destination)
+    return destination
 
 
 def main():
@@ -137,14 +146,17 @@ def main():
                         help="Apply and verify integration against the pinned host; skip compilation.")
     parser.add_argument("--upstream", default=ORIGIN,
                         help="Clone source (may be a local Moonlight git mirror containing tag v12.1).")
-    parser.add_argument("--output", type=Path, default=ROOT / "build/android")
+    parser.add_argument("--output", type=Path,
+                        help="Use a separate build directory and leave the APK in install/ unchanged.")
     args = parser.parse_args()
-    output = args.output.resolve()
+    output = (args.output or ROOT / "build/android").resolve()
     host = prepare(output, args.upstream)
     if args.prepare_only:
         print(f"Patched Moonlight {PIN} in {host}")
     else:
-        build(output, host)
+        apk = build(output, host)
+        if args.output is None:
+            copy_apk(apk, ROOT / "install/FlashLink-Android-arm64.apk")
 
 
 if __name__ == "__main__":
