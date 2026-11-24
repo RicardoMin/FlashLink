@@ -6,8 +6,8 @@
 
 | 设备 | 系统要求 | 应用文件 |
 | --- | --- | --- |
-| 被控电脑 | Windows 10/11 x64，已登录且桌面解锁 | `FlashLink-Windows-x64.exe` |
-| 手机或平板 | Android 7.0 及以上，arm64 | `FlashLink-Android-arm64.apk` |
+| 被控电脑 | Windows 10/11 x64，已登录且桌面解锁 | [Windows 单文件 EXE](../install/FlashLink-Windows-x64.exe?raw=true) 或 [便携 ZIP](../install/FlashLink-Windows-x64.zip?raw=true) |
+| 手机或平板 | Android 7.0 及以上，arm64 | [Android 测试 APK](../install/FlashLink-Android-arm64.apk?raw=true) |
 
 将 EXE 和 APK 分别复制到对应设备。Windows 单文件应用内含 Sunshine，安卓应用内含 Moonlight。若使用 Windows 便携 ZIP，请先完整解压，再双击其中的 `FlashLink.exe`。从 Git 克隆项目的开发者可以按下方步骤生成安装包。
 
@@ -69,7 +69,7 @@ python3 test/test_flashlink.py --mode field --android
 
 ## 从源码构建
 
-以下命令均从仓库根目录执行。首次构建需要联网获取上游源码和构建依赖。
+以下命令均从仓库根目录执行。首次构建需要联网获取上游源码和构建依赖。修改应用后，运行受影响平台的默认打包命令，将更新的 [install 测试包](../install/) 和对应源码放进同一个 PR。安卓测试包沿用同一签名，方便已有设备覆盖安装并保留配对数据。两端的第三方组件版本、许可证和源码入口见 [Android 声明](../apps/android/NOTICE.txt) 和 [Windows 声明](../crates/host-windows/assets/NOTICE.txt)。
 
 ### Windows 被控端
 
@@ -80,7 +80,7 @@ cargo build --locked --release -p flashlink-host
 python crates/host-windows/bundle.py --exe target/release/flashlink-host.exe --sunshine-zip "$env:USERPROFILE\Downloads\Sunshine-Windows-AMD64-lite.zip" --sunshine-license "$env:USERPROFILE\Downloads\Sunshine-LICENSE"
 ```
 
-打包脚本核验 Sunshine 的 SHA-256 后生成 `dist/FlashLink-Windows-x64.exe` 和 `dist/FlashLink-Windows-x64.zip`。
+打包脚本核验 Sunshine 的 SHA-256 后生成单文件 EXE 和便携 ZIP，默认同步到 `install/`，并保留 `dist/` 中的构建副本。
 
 ### Android 控制端
 
@@ -91,4 +91,4 @@ rustup target add aarch64-linux-android
 python3 apps/android/build.py
 ```
 
-把生成的 `build/android/flashlink-arm64-debug.apk` 安装到安卓设备。可在系统的应用信息中核对版本 `0.3.0-demo`（316）。[Android 构建脚本](../apps/android/build.py)
+默认构建成功后，APK 会写入 `install/FlashLink-Android-arm64.apk`，并保留 `build/android/flashlink-arm64-debug.apk`。两端的打包命令均可使用 `--output` 指定独立输出位置，用于本地试验。[Android 构建脚本](../apps/android/build.py)

@@ -64,8 +64,8 @@ def source_version():
 
 def binary_identity():
     result = {}
-    for name in ("FlashLink-Windows-x64.exe", "FlashLink-Android-arm64.apk"):
-        path = ROOT / "dist" / name
+    for name in ("FlashLink-Windows-x64.exe", "FlashLink-Windows-x64.zip", "FlashLink-Android-arm64.apk"):
+        path = ROOT / "install" / name
         if path.is_file():
             digest = hashlib.sha256()
             with path.open("rb") as file:

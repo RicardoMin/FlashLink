@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import pathlib
+import shutil
 import subprocess
 import struct
 import tempfile
@@ -28,8 +29,12 @@ def main():
     parser.add_argument("--target", default="x86_64-pc-windows-msvc")
     parser.add_argument("--rust-sysroot", type=pathlib.Path)
     parser.add_argument("--llvm-mingw", type=pathlib.Path)
-    parser.add_argument("--output", type=pathlib.Path, default=ROOT/"dist"/"FlashLink-Windows-x64.zip")
+    parser.add_argument("--output", type=pathlib.Path,
+                        help="Write a separate EXE/ZIP pair here. By default update dist/ and install/.")
     args = parser.parse_args()
+    update_install = args.output is None
+    if update_install:
+        args.output = ROOT / "dist" / "FlashLink-Windows-x64.zip"
     if args.output.suffix.lower() != ".zip":
         parser.error("--output must name the portable .zip archive")
     for name, digest in VDD_DIGESTS.items():
@@ -96,6 +101,16 @@ def main():
             f.write(original)
             f.write(notices)
             f.write(footer)
+        if update_install:
+            install = ROOT / "install"
+            install.mkdir(exist_ok=True)
+            # Stage both verified packages on the destination filesystem before replacing either.
+            with tempfile.TemporaryDirectory(dir=install) as staging:
+                for package in (application, archive):
+                    shutil.copyfile(package, pathlib.Path(staging) / package.name)
+                for package in (application, archive):
+                    (pathlib.Path(staging) / package.name).replace(install / package.name)
+            print(f"Test downloads: {install / single.name}, {install / archive.name}")
         application.replace(single)
         print(single, single.stat().st_size, hashlib.sha256(single.read_bytes()).hexdigest())
         archive.replace(args.output)
