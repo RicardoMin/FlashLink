@@ -27,7 +27,7 @@ final class FlashLinkStreamTools {
     private final FrameLayout layer;
     private final LinearLayout panel;
     private final ScrollView sheet;
-    private TextView mouseTab, modeTab, toolsTab, dragButton;
+    private TextView mouseTab, modeTab, toolsTab, resetTab, dragButton;
     private boolean mouseOpen, drag;
     private float lastX, lastY;
     private int trackingPointer = -1;
@@ -49,6 +49,12 @@ final class FlashLinkStreamTools {
         });
         updateModeTab();
         toolsTab = tab("工具", Gravity.END, 56, () -> toggle(false));
+        resetTab = button("复位视图", game::resetViewport);
+        resetTab.setVisibility(View.GONE);
+        FrameLayout.LayoutParams resetPosition = new FrameLayout.LayoutParams(dp(96), dp(42),
+                Gravity.BOTTOM | Gravity.END);
+        resetPosition.setMargins(dp(12), 0, dp(12), dp(12));
+        layer.addView(resetTab, resetPosition);
         sheet.setBackground(shape(0xeb172332, 16));
         sheet.setFillViewport(false);
         sheet.setVisibility(View.GONE);
@@ -63,6 +69,10 @@ final class FlashLinkStreamTools {
         boolean trackpad = game.isTouchscreenTrackpad();
         modeTab.setText(trackpad ? "触控板模式" : "直接触控");
         modeTab.setContentDescription(trackpad ? "触控板模式，点按切换为直接触控" : "直接触控，点按切换为触控板模式");
+    }
+
+    void showViewReset(boolean zoomed) {
+        resetTab.setVisibility(zoomed ? View.VISIBLE : View.GONE);
     }
 
     private TextView tab(String label, int edge, int width, Runnable action) {

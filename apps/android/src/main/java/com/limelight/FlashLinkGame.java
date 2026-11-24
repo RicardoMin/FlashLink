@@ -13,7 +13,6 @@ import android.view.MotionEvent;
 import android.view.View;
 
 import com.limelight.nvstream.NvConnection;
-import com.limelight.nvstream.input.MouseButtonPacket;
 import com.limelight.preferences.PreferenceConfiguration;
 
 /** Thin shell around Moonlight's real Activity and its native callbacks. */
@@ -28,7 +27,7 @@ public final class FlashLinkGame extends Game {
     private long startedAt;
     private boolean foreground;
     private FlashLinkStreamTools tools;
-    private FlashLinkDirectTouch directTouch;
+    private FlashLinkStreamTouch streamTouch;
     private FlashLinkPrivacyLease privacyLease;
 
     @Override protected void onCreate(Bundle state) {
@@ -101,30 +100,24 @@ public final class FlashLinkGame extends Game {
         finish();
     }
 
-    @Override protected boolean handleDirectFingerTouch(View source, View video, MotionEvent event,
+    @Override protected boolean handleStreamFingerTouch(View source, View video, MotionEvent event,
                                                         NvConnection connection) {
         if (tools == null || !foreground || !hasWindowFocus() || isFinishing()) return true;
-        if (directTouch == null) {
-            directTouch = new FlashLinkDirectTouch(video, new FlashLinkTouchGesture.Output() {
-                public void position(short x, short y, short width, short height) {
-                    connection.sendMousePosition(x, y, width, height);
-                }
-                public void button(boolean right, boolean down) {
-                    byte button = right ? MouseButtonPacket.BUTTON_RIGHT : MouseButtonPacket.BUTTON_LEFT;
-                    if (down) connection.sendMouseButtonDown(button);
-                    else connection.sendMouseButtonUp(button);
-                }
-                public void scroll(short amount) {
-                    connection.sendMouseHighResScroll(amount);
-                }
-            });
-        }
-        directTouch.onTouch(source, event);
-        return true;
+        if (streamTouch == null) streamTouch = new FlashLinkStreamTouch(this, video, connection);
+        return streamTouch.onTouch(source, event, isTouchscreenTrackpad());
     }
 
     @Override protected void onTouchscreenCancelled() {
-        if (directTouch != null) directTouch.cancel();
+        if (streamTouch != null) streamTouch.cancel();
+    }
+
+    void showViewReset(boolean zoomed) {
+        if (tools != null) tools.showViewReset(zoomed);
+    }
+
+    void resetViewport() {
+        releaseControls();
+        if (streamTouch != null) streamTouch.reset();
     }
 
     void toggleTouchMode() {

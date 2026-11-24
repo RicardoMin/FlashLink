@@ -27,6 +27,7 @@ OBSERVATIONS = {
     "first_pair": "两端核对确认码并在 Windows 允许后，安卓能进入桌面吗？",
     "trusted_launch": "退出后再点同一设备，能直接连接吗？",
     "interaction": "实际操作时，翻页、右键、滚动、拖动、键盘都生效吗？",
+    "viewport": "双指放大后能移动到四角、点中可见按钮，并用「复位视图」恢复整幅桌面吗？",
     "audio": "从首句语音开始，声音连续、左右声道正确，且与画面同步吗？",
     "privacy": "开启隐私后，每块物理屏都看不到桌面，而平板仍能正常翻页吗？",
     "reconnect": "短时断开 Wi-Fi 再恢复，能自动回到同一会话吗？",
@@ -135,7 +136,7 @@ def development():
         for check_name, name in (("android_recovery", "FlashLinkReconnect"),
                                  ("android_touch", "FlashLinkTouchGesture")):
             compile_check = check_name + "_compile"
-            check(compile_check, [jdk_tool("javac"), "-d", java_classes,
+            check(compile_check, [jdk_tool("javac"), "-sourcepath", android / "main/java", "-d", java_classes,
                   main_java / (name + ".java"), test_java / (name + "Test.java")])
             if checks[compile_check]["status"] == "passed":
                 check(check_name + "_policy", [jdk_tool("java"), "-ea", "-cp", java_classes,

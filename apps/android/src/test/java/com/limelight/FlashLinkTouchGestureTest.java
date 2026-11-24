@@ -13,8 +13,14 @@ public final class FlashLinkTouchGestureTest {
         final Map<Runnable, Long> pending = new LinkedHashMap<>();
         final FlashLinkTouchGesture touch = new FlashLinkTouchGesture(this, this, 8, 500, 2);
         long clock;
+        float scale, translationX, translationY;
 
-        Fixture() { touch.viewport(50, 100, 1000, 600); }
+        Fixture() { touch.viewport(50, 100, 1000, 600, 1100, 800); }
+        public void transform(float scale, float x, float y) {
+            this.scale = scale;
+            translationX = x;
+            translationY = y;
+        }
         public void position(short x, short y, short w, short h) {
             events.add("pos " + x + " " + y + " " + w + " " + h);
         }
@@ -44,6 +50,35 @@ public final class FlashLinkTouchGestureTest {
         void expect(String... expected) {
             if (!events.equals(Arrays.asList(expected))) throw new AssertionError(events + " != " + Arrays.toString(expected));
             events.clear();
+        }
+
+        void expectTransform(float zoom, float x, float y) {
+            if (Math.abs(scale - zoom) > .001f || Math.abs(translationX - x) > .01f ||
+                    Math.abs(translationY - y) > .01f)
+                throw new AssertionError("Unexpected transform " + scale + " " + translationX + " " + translationY);
+        }
+
+        void startTwo(float x1, float x2, float y) {
+            touch.down(9, x1, y, clock);
+            if (events.size() != 1 || !events.remove(0).startsWith("pos ")) throw new AssertionError(events);
+            touch.secondDown(2, x1, y, x2, y);
+            if (!touch.isTwoFingerPending()) throw new AssertionError("Second contact was ignored");
+        }
+
+        void endTwo() {
+            if (!touch.isTransforming()) throw new AssertionError("Viewport gesture lost before lift");
+            touch.cancel(); // First pointer up, then a move and lift from the remaining pointer.
+            touch.move(9, 550, 390);
+            touch.up(9, 550, 390, clock);
+            advance(clock + 600);
+            expect();
+        }
+
+        void tap(float x, float y, String expectedPosition) {
+            touch.down(1, x, y, clock);
+            touch.up(1, x, y, clock + 20);
+            advance(clock + 80);
+            expect(expectedPosition, expectedPosition, "left down", "left up");
         }
     }
 
@@ -119,7 +154,7 @@ public final class FlashLinkTouchGestureTest {
         f.advance(2000);
         f.expect("pos 500 300 1000 600", "pos 500 300 1000 600", "left down", "left up");
         f.touch.down(3, 550, 400, 2000);
-        f.touch.viewport(5, 10, 600, 1000);
+        f.touch.viewport(5, 10, 600, 1000, 610, 1020);
         f.advance(3000);
         f.touch.up(3, 550, 400, 3000);
         f.expect("pos 500 300 1000 600");
@@ -148,11 +183,105 @@ public final class FlashLinkTouchGestureTest {
         f.expect("pos 500 300 1000 600");
     }
 
+    private static void pinchPanAndTap() {
+        Fixture f = new Fixture();
+        f.startTwo(400, 600, 360);
+        f.touch.twoMove(2, 603, 359, 9, 398, 361);
+        if (!f.touch.isTwoFingerPending()) throw new AssertionError("Sub-slop jitter claimed the gesture");
+        f.touch.twoMove(9, 300, 360, 2, 700, 360);
+        f.endTwo();
+        f.expectTransform(2, -450, -260);
+        // At 2x this off-center pinch keeps the original video point below the midpoint.
+        f.tap(500, 360, "pos 900 520 2000 1200");
+        for (int xDir : new int[]{1, -1}) {
+            for (int yDir : new int[]{1, -1}) {
+                for (int i = 0; i < 3; i++) {
+                    f.startTwo(520, 580, 400);
+                    f.touch.twoMove(2, 580 + xDir * 440, 400 + yDir * 300,
+                                    9, 520 + xDir * 440, 400 + yDir * 300);
+                    f.endTwo();
+                }
+                f.expectTransform(2, xDir > 0 ? -50 : -950, yDir > 0 ? -100 : -500);
+                f.tap(xDir > 0 ? 0 : 1099, yDir > 0 ? 0 : 799,
+                      "pos " + (xDir > 0 ? 0 : 1999) + " " + (yDir > 0 ? 0 : 1199) + " 2000 1200");
+            }
+        }
+        f.startTwo(500, 600, 400);
+        f.touch.resetViewport();
+        f.touch.up(9, 550, 400, f.clock);
+        f.advance(f.clock + 600);
+        f.expect();
+        f.expectTransform(1, 0, 0);
+        f.tap(50, 100, "pos 0 0 1000 600");
+        f.tap(1049, 699, "pos 999 599 1000 600");
+        f.touch.down(1, 0, 0, f.clock);
+        f.touch.up(1, 0, 0, f.clock + 10);
+        f.expect();
+    }
+
+    private static void pinchLimitsAndLayout() {
+        Fixture f = new Fixture();
+        f.startTwo(500, 540, 400);
+        f.touch.twoMove(9, 120, 400, 2, 920, 400); // Overshoot the 4x limit.
+        f.expectTransform(4, -1410, -900);
+        f.touch.twoMove(9, 320, 400, 2, 720, 400); // Start shrinking immediately.
+        f.expectTransform(2, -470, -300);
+        f.touch.twoMove(9, 510, 400, 2, 530, 400);
+        f.expectTransform(1, 0, 0);
+        f.touch.twoMove(9, 510, 500, 2, 530, 500); // Still a local gesture at minimum scale.
+        f.endTwo();
+        f.startTwo(420, 620, 400);
+        f.touch.twoMove(9, 400, 420, 2, 640, 420); // Enlarged video is still letterboxed vertically.
+        f.endTwo();
+        f.expectTransform(1.2f, -94, -60);
+        f.touch.down(1, 500, 39, f.clock);
+        f.touch.up(1, 500, 39, f.clock);
+        f.expect();
+        f.startTwo(460, 580, 400);
+        f.touch.viewport(0, 250, 600, 300, 600, 800); // Rotation or stream aspect ratio change.
+        f.touch.twoMove(9, 300, 350, 2, 550, 350);
+        f.touch.up(9, 300, 350, f.clock);
+        f.expect();
+        f.expectTransform(1, 0, 0);
+        f.tap(300, 400, "pos 300 150 600 300");
+    }
+
+    private static void pinchAfterLongPress() {
+        Fixture f = new Fixture();
+        f.touch.down(9, 450, 400, 0);
+        f.advance(500);
+        f.expect("pos 400 300 1000 600", "pos 400 300 1000 600", "right down");
+        f.touch.secondDown(2, 450, 400, 650, 400);
+        f.expect("right up");
+        f.touch.twoMove(9, 350, 400, 2, 750, 400);
+        f.endTwo();
+        f.expectTransform(2, -500, -300);
+    }
+
+    private static void trackpadTapSlop() {
+        Fixture f = new Fixture();
+        f.startTwo(500, 600, 400);
+        f.touch.twoMove(2, 601, 399, 9, 499, 401);
+        if (f.touch.isDisplacedTwoFingerPending()) throw new AssertionError("Jitter swallowed a trackpad tap");
+        f.touch.twoMove(2, 700, 400, 9, 600, 400);
+        f.touch.twoMove(9, 500, 400, 2, 600, 400);
+        if (!f.touch.isDisplacedTwoFingerPending()) throw new AssertionError("Sweep became a trackpad tap");
+        f.touch.cancel();
+        f.startTwo(500, 600, 400);
+        if (f.touch.isDisplacedTwoFingerPending()) throw new AssertionError("New tap inherited the sweep");
+        f.touch.twoMove(9, 550, 350, 2, 550, 450); // Rotation with stationary midpoint and constant span.
+        if (!f.touch.isDisplacedTwoFingerPending()) throw new AssertionError("Rotation became a trackpad tap");
+    }
+
     public static void main(String[] args) {
         coordinatesAndBars();
         tapsAndMovement();
         longPressAndCancel();
         twoFingers();
+        pinchPanAndTap();
+        pinchLimitsAndLayout();
+        pinchAfterLongPress();
+        trackpadTapSlop();
         System.out.println("Touch gesture tests passed");
     }
 }
