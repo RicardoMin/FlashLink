@@ -20,9 +20,18 @@ impl Snapshot {
     pub fn capture() -> Self {
         unsafe {
             let dpi = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-            let initialized = CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32) >= 0;
-            let snapshot = if initialized { flashlink_snapshot_icons() } else { std::ptr::null_mut() };
-            Self { snapshot, dpi, initialized }
+            let initialized =
+                CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32) >= 0;
+            let snapshot = if initialized {
+                flashlink_snapshot_icons()
+            } else {
+                std::ptr::null_mut()
+            };
+            Self {
+                snapshot,
+                dpi,
+                initialized,
+            }
         }
     }
 
@@ -57,10 +66,14 @@ impl DesktopIcons {
             // Explorer can stop answering briefly during a hotplug. Keep its
             // COM apartment off the thread responsible for the stream lease.
             let snapshot = Snapshot::capture();
-            if ready.send(!snapshot.snapshot.is_null()).is_err() { return; }
+            if ready.send(!snapshot.snapshot.is_null()).is_err() {
+                return;
+            }
             for reply in work {
                 snapshot.align(reply.is_some());
-                if let Some(done) = reply { let _ = done.send(()); }
+                if let Some(done) = reply {
+                    let _ = done.send(());
+                }
             }
         });
         match captured.recv_timeout(Duration::from_secs(3)) {

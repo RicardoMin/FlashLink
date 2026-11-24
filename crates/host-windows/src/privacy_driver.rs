@@ -199,13 +199,26 @@ const DEFAULT_SETTINGS: &str = include_str!("../assets/mttvdd/vdd_settings.xml")
 // Only the installer writes the protected settings file. A new monitor can be
 // added by running the same installer again, without replacing the signed driver.
 fn settings_with_modes(settings: &str, modes: &[(u32, u32)]) -> io::Result<String> {
-    let (prefix, suffix) = settings.split_once("</resolutions>")
+    let (prefix, suffix) = settings
+        .split_once("</resolutions>")
         .ok_or_else(|| io::Error::other("虚拟屏配置缺少 resolutions 节点"))?;
     let mut result = prefix.to_owned();
     let mut known = std::collections::BTreeSet::new();
     for block in prefix.split("<resolution>").skip(1) {
-        let number = |start, end| block.split_once(start)?.1.split_once(end)?.0.trim().parse::<u32>().ok();
-        if let (Some(w), Some(h)) = (number("<width>", "</width>"), number("<height>", "</height>")) {
+        let number = |start, end| {
+            block
+                .split_once(start)?
+                .1
+                .split_once(end)?
+                .0
+                .trim()
+                .parse::<u32>()
+                .ok()
+        };
+        if let (Some(w), Some(h)) = (
+            number("<width>", "</width>"),
+            number("<height>", "</height>"),
+        ) {
             known.insert((w, h));
         }
     }
@@ -223,8 +236,15 @@ fn uses_directory(dir: &Path) -> bool {
     let mut value = [0u16; 1024];
     let mut bytes = size_of_val(&value) as u32;
     let status = unsafe {
-        RegGetValueW(HKEY_LOCAL_MACHINE, wide(r"SOFTWARE\MikeTheTech\VirtualDisplayDriver").as_ptr(),
-            wide("VDDPATH").as_ptr(), RRF_RT_REG_SZ, ptr::null_mut(), value.as_mut_ptr().cast(), &mut bytes)
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            wide(r"SOFTWARE\MikeTheTech\VirtualDisplayDriver").as_ptr(),
+            wide("VDDPATH").as_ptr(),
+            RRF_RT_REG_SZ,
+            ptr::null_mut(),
+            value.as_mut_ptr().cast(),
+            &mut bytes,
+        )
     };
     let len = value.iter().position(|&c| c == 0).unwrap_or(value.len());
     status == 0 && PathBuf::from(std::ffi::OsString::from_wide(&value[..len])) == dir
@@ -237,7 +257,9 @@ fn update_modes(dir: &Path) -> io::Result<bool> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => None,
         Err(e) => return Err(e),
     };
-    let sizes = super::privacy_display::Topology::active().map_err(io::Error::other)?.physical_desktop_sizes();
+    let sizes = super::privacy_display::Topology::active()
+        .map_err(io::Error::other)?
+        .physical_desktop_sizes();
     let settings = settings_with_modes(existing.as_deref().unwrap_or(DEFAULT_SETTINGS), &sizes)?;
     if existing.as_ref() == Some(&settings) {
         return Ok(false);
@@ -246,7 +268,9 @@ fn update_modes(dir: &Path) -> io::Result<bool> {
     getrandom::fill(&mut nonce).map_err(|e| io::Error::other(e.to_string()))?;
     let temporary = dir.join(format!("settings-{:x}.tmp", u64::from_ne_bytes(nonce)));
     let mut file = fs::File::create_new(&temporary)?;
-    let write = file.write_all(settings.as_bytes()).and_then(|_| file.sync_all());
+    let write = file
+        .write_all(settings.as_bytes())
+        .and_then(|_| file.sync_all());
     drop(file);
     if let Err(e) = write.and_then(|_| fs::rename(&temporary, &path)) {
         let _ = fs::remove_file(temporary);

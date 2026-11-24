@@ -289,12 +289,7 @@ pub fn format_available_target_log(
     )
 }
 
-pub fn format_indexed_path_log(
-    secs: u64,
-    phase: &str,
-    index: usize,
-    path: &PathLogInfo,
-) -> String {
+pub fn format_indexed_path_log(secs: u64, phase: &str, index: usize, path: &PathLogInfo) -> String {
     format!(
         "{secs} phase={phase} index={index} {}",
         format_path_fields(path)
@@ -418,7 +413,10 @@ mod tests {
         );
 
         let impossible = vec![vec![(0, 0x11df5, 0)], vec![(0, 0x11df5, 0)]];
-        assert_eq!(select_grouped_source_paths(&impossible, &[None, None]), None);
+        assert_eq!(
+            select_grouped_source_paths(&impossible, &[None, None]),
+            None
+        );
 
         // Cloned monitors on the same adapter: both targets in group 0 must share one source ID.
         let cloned = vec![

@@ -12,7 +12,8 @@ pub struct DisplayRepair {
 
 impl DisplayRepair {
     pub fn can_repair(&mut self, now: Instant) -> bool {
-        self.writes.retain(|t| now.saturating_duration_since(*t) < Duration::from_secs(30));
+        self.writes
+            .retain(|t| now.saturating_duration_since(*t) < Duration::from_secs(30));
         self.writes.len() < 4
             && now.duration_since(*self.first_mismatch.get_or_insert(now)) < Duration::from_secs(5)
     }
