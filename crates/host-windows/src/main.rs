@@ -21,6 +21,11 @@ mod privacy;
 #[cfg(windows)]
 mod privacy_display;
 #[cfg(windows)]
+mod desktop_icons;
+#[cfg(any(windows, test))]
+#[cfg_attr(not(windows), allow(dead_code))]
+mod privacy_display_plan;
+#[cfg(windows)]
 mod privacy_driver;
 #[cfg(any(windows, test))]
 mod privacy_time;

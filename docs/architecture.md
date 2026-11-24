@@ -44,7 +44,7 @@ flowchart LR
 
 Flutter 呈现手机设备列表及平板的列表／详情双栏。串流打开后由 Android 原生播放器管理覆盖在画面上的鼠标和工具面板。重连逻辑监听实际媒体回调，使用单调时钟、退避间隔与 15 秒期限；只使用已配对身份，主动断开不触发重连。播放器将分时段的接收帧、提交至 Surface 的帧以及丢帧写入诊断计数。[原生播放器](../apps/android/src/main/java/com/limelight/FlashLinkGame.java) · [重连策略](../apps/android/src/main/java/com/limelight/FlashLinkReconnect.java)
 
-Windows 主进程提供系统托盘、逐设备撤销和报告导出。启用隐私后，独立 Rust 守护进程保存显示恢复信息，调用 Windows 显示配置 API，仅启用已识别的 MttVDD 虚拟输出并检查活动显示路径。安卓在原生播放器运行时通过双向 TLS 发送心跳；主机按 Sunshine 中已授权的客户端证书验证身份。心跳中断约 5 秒后进入 15 秒宽限期；期限结束后，守护进程停止串流、请求 Windows 锁定、确认会话锁定，再恢复显示。主机确认恢复完成且本机已解锁后重新开启引擎与发现，沿用原配对记录。诊断文件记录这些状态的先后顺序。[显示拓扑](../crates/host-windows/src/privacy_display.rs) · [隐私守护进程](../crates/host-windows/src/privacy.rs) · [安卓心跳](../apps/android/src/main/java/com/limelight/FlashLinkPrivacyLease.java)
+Windows 主进程提供系统托盘、逐设备撤销和报告导出。启用隐私后，独立 Rust 守护进程保存显示恢复信息，调用 Windows 显示配置 API，仅启用已识别的 MttVDD 虚拟输出并检查活动显示路径。安卓在原生播放器运行时通过双向 TLS 发送心跳；主机按 Sunshine 中已授权的客户端证书验证身份。心跳中断约 5 秒后进入 15 秒宽限期；期限结束后，守护进程停止串流并恢复实体屏。已授权的串流期间出现持续显示异常时，守护进程先尝试恢复原布局并继续串流，主机窗口会提示隐私已退出。主机确认恢复完成且本机已解锁后重新开启引擎与发现，沿用原配对记录。诊断文件记录这些状态的先后顺序。[显示拓扑](../crates/host-windows/src/privacy_display.rs) · [隐私守护进程](../crates/host-windows/src/privacy.rs) · [安卓心跳](../apps/android/src/main/java/com/limelight/FlashLinkPrivacyLease.java)
 
 ## 构建
 

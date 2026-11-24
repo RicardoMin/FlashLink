@@ -23,7 +23,7 @@ pub fn attach_menu(window: HWND) {
     unsafe {
         let bar = CreateMenu();
         let actions = CreatePopupMenu();
-        add(actions, PRIVACY, "开启隐私 / 锁屏并结束隐私");
+        add(actions, PRIVACY, "切换隐私模式");
         add(actions, RESTORE, "本机恢复显示…");
         add(actions, VDD, "安装虚拟屏…");
         add(actions, DEVICES, "管理已授权设备…");

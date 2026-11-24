@@ -2,11 +2,35 @@ use std::time::{Duration, Instant};
 
 pub const STALE: Duration = Duration::from_secs(5);
 pub const GRACE: Duration = Duration::from_secs(15);
+// Bound a continuous loss of the virtual-only desktop. A successful mode-set
+// call alone does not establish recovery: the active paths must be read back.
+#[derive(Default)]
+pub struct DisplayRepair {
+    first_mismatch: Option<Instant>,
+    writes: std::collections::VecDeque<Instant>,
+}
+
+impl DisplayRepair {
+    pub fn can_repair(&mut self, now: Instant) -> bool {
+        self.writes.retain(|t| now.saturating_duration_since(*t) < Duration::from_secs(30));
+        self.writes.len() < 4
+            && now.duration_since(*self.first_mismatch.get_or_insert(now)) < Duration::from_secs(5)
+    }
+
+    pub fn reapplied(&mut self, now: Instant) {
+        self.writes.push_back(now);
+    }
+
+    pub fn verified(&mut self) {
+        self.first_mismatch = None;
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum State {
     Playing,
     Reconnecting,
-    Locking,
+    Expired,
 }
 
 pub struct Timer {
@@ -23,8 +47,8 @@ impl Timer {
     pub fn tick(&mut self, now: Instant, heartbeat: bool) -> State {
         // Expiration is irreversible, including a heartbeat arriving exactly at the deadline.
         let age = now.saturating_duration_since(self.last);
-        if self.state == State::Locking || age >= STALE + GRACE {
-            self.state = State::Locking;
+        if self.state == State::Expired || age >= STALE + GRACE {
+            self.state = State::Expired;
         } else if heartbeat {
             self.last = now;
             self.state = State::Playing;
@@ -32,23 +56,6 @@ impl Timer {
             self.state = State::Reconnecting;
         }
         self.state
-    }
-}
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RecoveryStep {
-    Lock,
-    Restore,
-    Wait,
-}
-/// Unlocking after a GPU refused restoration on Winlogon's desktop gives the local owner
-/// control again. The explicit local restore action is scoped to the current transaction.
-pub fn recovery_step(locked: Option<bool>, saw_lock: bool, local_consent: bool) -> RecoveryStep {
-    if locked == Some(true) || (locked == Some(false) && local_consent) {
-        RecoveryStep::Restore
-    } else if saw_lock {
-        RecoveryStep::Wait
-    } else {
-        RecoveryStep::Lock
     }
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -72,27 +79,41 @@ pub fn desktop_state(pending: bool, locked: Option<bool>) -> Desktop {
 mod tests {
     use super::*;
     #[test]
+    fn repeated_mode_sets_end_privacy_even_if_windows_temporarily_recovers() {
+        let start = Instant::now();
+        let mut repair = DisplayRepair::default();
+        for seconds in [0, 2, 13, 26] {
+            let now = start + Duration::from_secs(seconds);
+            assert!(repair.can_repair(now));
+            repair.reapplied(now);
+            repair.verified();
+        }
+        assert!(!repair.can_repair(start + Duration::from_secs(29)));
+        assert!(repair.can_repair(start + Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn recovered_samples_reset_the_continuous_mismatch_deadline() {
+        let start = Instant::now();
+        let mut repair = DisplayRepair::default();
+        for seconds in [0, 2, 4, 6] {
+            assert!(repair.can_repair(start + Duration::from_secs(seconds)));
+            repair.verified();
+        }
+        // Successful writes without an observed recovery must still time out.
+        for seconds in 7..12 {
+            assert!(repair.can_repair(start + Duration::from_secs(seconds)));
+        }
+        assert!(!repair.can_repair(start + Duration::from_secs(12)));
+    }
+
+    #[test]
     fn service_resumes_after_recovery_and_owner_unlock_in_either_order() {
         assert_eq!(desktop_state(true, Some(false)), Desktop::Recovering);
         assert_eq!(desktop_state(true, Some(true)), Desktop::Recovering);
         assert_eq!(desktop_state(false, Some(true)), Desktop::Locked);
         assert_eq!(desktop_state(false, None), Desktop::Unknown);
         assert_eq!(desktop_state(false, Some(false)), Desktop::Ready);
-    }
-    #[test]
-    fn automatic_restore_requires_confirmed_lock_and_respects_a_later_local_unlock() {
-        assert_eq!(recovery_step(None, false, false), RecoveryStep::Lock);
-        assert_eq!(recovery_step(Some(false), false, false), RecoveryStep::Lock);
-        assert_eq!(
-            recovery_step(Some(true), false, false),
-            RecoveryStep::Restore
-        );
-        assert_eq!(recovery_step(Some(false), true, false), RecoveryStep::Wait);
-        assert_eq!(recovery_step(None, true, true), RecoveryStep::Wait);
-        assert_eq!(
-            recovery_step(Some(false), true, true),
-            RecoveryStep::Restore
-        );
     }
     #[test]
     fn privacy_lease_restores_only_before_deadline() {
@@ -103,7 +124,7 @@ mod tests {
             lease.tick(now + STALE + GRACE - Duration::from_millis(1), true),
             State::Playing
         );
-        assert_eq!(lease.tick(now + (STALE + GRACE) * 2, true), State::Locking);
-        assert_eq!(lease.tick(now + (STALE + GRACE) * 2, true), State::Locking);
+        assert_eq!(lease.tick(now + (STALE + GRACE) * 2, true), State::Expired);
+        assert_eq!(lease.tick(now + (STALE + GRACE) * 2, true), State::Expired);
     }
 }

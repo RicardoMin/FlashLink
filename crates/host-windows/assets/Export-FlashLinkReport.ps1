@@ -54,8 +54,17 @@ $events = @()
 $privacyLog = Join-Path $StateDir 'privacy-events.log'
 if (Test-Path -LiteralPath $privacyLog -PathType Leaf) {
     $events = @(foreach ($line in Get-Content -LiteralPath $privacyLog -Tail 256) {
-        if ($line -cmatch '^(\d{1,12})\s+(private|lost|resumed|locking|locked|restored|restore_pending)$') {
+        if ($line -cmatch '^(\d{1,12})\s+(private|lost|resumed|locking|locked|restored|restore_pending|display_reapplied|guard_(?:pipe_closed|display_changed|display_timeout|display_without_lease|desktop_unavailable|engine_exited|lease_expired|user_end|owner_unavailable|management_unavailable))$') {
             [ordered]@{ unix_seconds = [long]$Matches[1]; event = $Matches[2] }
+        }
+    })
+}
+$displayLog = @()
+$privacyDisplayLog = Join-Path $StateDir 'privacy-display.log'
+if (Test-Path -LiteralPath $privacyDisplayLog -PathType Leaf) {
+    $displayLog = @(foreach ($line in Get-Content -LiteralPath $privacyDisplayLog -Tail 256) {
+        if ($line -cmatch '^\d{1,12}\s+phase=[a-z_]+(?:\s+[a-z_]+=[-0-9a-zA-Z_,/:]+)+$') {
+            $line
         }
     })
 }
@@ -64,6 +73,7 @@ $report = [ordered]@{
     platform = 'Windows'; os_release = [Environment]::OSVersion.Version.ToString()
     graphics = [ordered]@{ status = $gpuStatus; adapters = $video }
     host = $engine; previous_stream_log = $previous; privacy_events = $events
+    privacy_display_log = $displayLog
     physical_screen_observation = 'not_tested'; audible_playback_observation = 'not_tested'
 }
 if ($HostExecutable -and (Test-Path -LiteralPath $HostExecutable -PathType Leaf)) {

@@ -106,6 +106,7 @@ fn wait_for_desktop(
             .map_err(|e| e.to_string())?;
         let state = desktop_state(pending, super::privacy::locked());
         if state == Desktop::Ready {
+            super::privacy::reconcile_deferred_restore(dir);
             return Ok(true);
         }
         if last != Some(state) {
@@ -234,6 +235,7 @@ fn run_engine(
     });
     let mut active: Option<(String, super::lan::Approval, Instant)> = None;
     let mut next_poll = Instant::now();
+    let mut next_deferred = Instant::now();
     let mut failures = 0;
     let mut guard: Option<super::privacy::Guard> = None;
     loop {
@@ -244,14 +246,17 @@ fn run_engine(
             let exited = g.exited();
             let mut ending = false;
             for message in g.messages.try_iter() {
-                if matches!(message.as_str(), "LOCKING" | "RESTORED") {
+                if matches!(message.as_str(), "RECOVERING" | "RESTORED") {
                     ending = true;
                 }
                 let text = match message.as_str() {
                     "PRIVATE" => "隐私已开启，只有虚拟屏幕处于活动状态。",
+                    "VISIBLE" => "已退出隐私，原显示布局已恢复，串流继续。",
                     "GRACE" => "连接中断，正在等待原设备重新连接…",
-                    "LOCKING" => "正在锁定 Windows，确认锁定后将恢复显示。",
-                    "RESTORED" => "原显示已恢复，请在电脑解锁。",
+                    "DISPLAY_UNSTABLE" => "显示配置不稳定，正在退出隐私并恢复实体屏。",
+                    "VISIBLE_FALLBACK" => "已自动退出隐私，实体屏已恢复，串流继续。",
+                    "RECOVERING" => "串流已结束，正在恢复实体屏。",
+                    "RESTORED" => "已恢复原显示布局。",
                     msg => msg.strip_prefix("ERROR ").unwrap_or(msg),
                 };
                 let _ = ui.send(Event::Privacy(text.into()));
@@ -272,7 +277,7 @@ fn run_engine(
         }
         if let Some(exit) = child.try_wait().map_err(|e| e.to_string())? {
             // The guard marks its own process exit. This also covers the race where the child
-            // exits after try_wait above but before LOCKING arrives on the guard's stdout pipe.
+            // exits after try_wait above but before RECOVERING arrives on the guard's stdout pipe.
             if exit.code() == Some(super::privacy::ENGINE_EXIT as i32)
                 || (guard.is_some() && dir.join(super::privacy::MARKER).exists())
             {
@@ -287,11 +292,18 @@ fn run_engine(
         match commands.recv_timeout(Duration::from_millis(150)) {
             Ok(Action::TogglePrivacy) => {
                 if let Some(g) = guard.as_mut() {
-                    g.finish();
+                    if super::lease::sole_owner(dir).ok() == Some(g.owner) {
+                        g.end_by_user(dir);
+                    } else {
+                        g.finish(dir, "guard_owner_unavailable");
+                    }
                 } else {
                     let result = (|| {
                         if active.is_some() {
                             return Err("请先处理待授权请求。".into());
+                        }
+                        if super::privacy::reconcile_deferred_restore(dir) {
+                            return Err("正在恢复重新接入的原显示器布局，请稍后再切换隐私。".into());
                         }
                         let owner = super::lease::sole_owner(dir)?;
                         let beat = nearby
@@ -350,12 +362,19 @@ fn run_engine(
         }
         next_poll = Instant::now() + Duration::from_millis(650);
         if super::privacy::locked() != Some(false) {
+            if let Some(g) = guard.as_mut() {
+                g.finish(dir, "guard_desktop_unavailable");
+            }
             return pause_engine(&mut child);
         }
         if let Some(g) = guard.as_mut() {
             if super::lease::sole_owner(dir).ok() != Some(g.owner) {
-                g.finish();
+                g.finish(dir, "guard_owner_unavailable");
             }
+        } else if Instant::now() >= next_deferred
+            && super::privacy::reconcile_deferred_restore(dir)
+        {
+            next_deferred = Instant::now() + Duration::from_millis(1500);
         }
         let pending = match api.pending() {
             Ok(p) => {
@@ -365,6 +384,9 @@ fn run_engine(
             Err(e) => {
                 failures += 1;
                 if failures >= 3 {
+                    if guard.is_some() {
+                        super::privacy::record(dir, "guard_management_unavailable");
+                    }
                     return Err(format!("无法与本机引擎通信：{e}。请重新开始。"));
                 }
                 continue;

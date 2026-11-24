@@ -194,14 +194,75 @@ fn register(inf: &Path) -> io::Result<bool> {
         Ok(reboot != 0)
     }
 }
+const DEFAULT_SETTINGS: &str = include_str!("../assets/mttvdd/vdd_settings.xml");
+
+// Only the installer writes the protected settings file. A new monitor can be
+// added by running the same installer again, without replacing the signed driver.
+fn settings_with_modes(settings: &str, modes: &[(u32, u32)]) -> io::Result<String> {
+    let (prefix, suffix) = settings.split_once("</resolutions>")
+        .ok_or_else(|| io::Error::other("虚拟屏配置缺少 resolutions 节点"))?;
+    let mut result = prefix.to_owned();
+    let mut known = std::collections::BTreeSet::new();
+    for block in prefix.split("<resolution>").skip(1) {
+        let number = |start, end| block.split_once(start)?.1.split_once(end)?.0.trim().parse::<u32>().ok();
+        if let (Some(w), Some(h)) = (number("<width>", "</width>"), number("<height>", "</height>")) {
+            known.insert((w, h));
+        }
+    }
+    for &(width, height) in modes {
+        if width > 0 && height > 0 && known.insert((width, height)) {
+            result.push_str(&format!("<resolution><width>{width}</width><height>{height}</height><refresh_rate>60</refresh_rate></resolution>\n    "));
+        }
+    }
+    result.push_str("</resolutions>");
+    result.push_str(suffix);
+    Ok(result)
+}
+
+fn uses_directory(dir: &Path) -> bool {
+    let mut value = [0u16; 1024];
+    let mut bytes = size_of_val(&value) as u32;
+    let status = unsafe {
+        RegGetValueW(HKEY_LOCAL_MACHINE, wide(r"SOFTWARE\MikeTheTech\VirtualDisplayDriver").as_ptr(),
+            wide("VDDPATH").as_ptr(), RRF_RT_REG_SZ, ptr::null_mut(), value.as_mut_ptr().cast(), &mut bytes)
+    };
+    let len = value.iter().position(|&c| c == 0).unwrap_or(value.len());
+    status == 0 && PathBuf::from(std::ffi::OsString::from_wide(&value[..len])) == dir
+}
+
+fn update_modes(dir: &Path) -> io::Result<bool> {
+    let path = dir.join("vdd_settings.xml");
+    let existing = match fs::read_to_string(&path) {
+        Ok(text) => Some(text),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e),
+    };
+    let sizes = super::privacy_display::Topology::active().map_err(io::Error::other)?.physical_desktop_sizes();
+    let settings = settings_with_modes(existing.as_deref().unwrap_or(DEFAULT_SETTINGS), &sizes)?;
+    if existing.as_ref() == Some(&settings) {
+        return Ok(false);
+    }
+    let mut nonce = [0u8; 8];
+    getrandom::fill(&mut nonce).map_err(|e| io::Error::other(e.to_string()))?;
+    let temporary = dir.join(format!("settings-{:x}.tmp", u64::from_ne_bytes(nonce)));
+    let mut file = fs::File::create_new(&temporary)?;
+    let write = file.write_all(settings.as_bytes()).and_then(|_| file.sync_all());
+    drop(file);
+    if let Err(e) = write.and_then(|_| fs::rename(&temporary, &path)) {
+        let _ = fs::remove_file(temporary);
+        return Err(e);
+    }
+    Ok(true)
+}
+
 pub fn install() -> io::Result<String> {
-    if installed()? {
+    let dir = program_files()?.join("FlashLink Virtual Display 25.7.23");
+    if installed()? && !uses_directory(&dir) {
         return Ok(
             "已存在虚拟屏组件。如果没有显示输出，请在设备管理器中启用 Virtual Display Driver。"
                 .into(),
         );
     }
-    let dir = program_files()?.join("FlashLink Virtual Display 25.7.23");
     match fs::create_dir(&dir) {
         Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
@@ -215,16 +276,15 @@ pub fn install() -> io::Result<String> {
         .open(dir.join("setup.lock"))?;
     lock.try_lock()?;
     if installed()? {
+        if uses_directory(&dir) && update_modes(&dir)? {
+            return Ok("已加入当前实体屏的桌面分辨率。重启 Windows 后新模式生效。".into());
+        }
         return Ok("虚拟屏已安装。".into());
     }
     const FILES: &[(&str, &[u8])] = &[
         ("MttVDD.inf", include_bytes!("../assets/mttvdd/MttVDD.inf")),
         ("MttVDD.dll", include_bytes!("../assets/mttvdd/MttVDD.dll")),
         ("mttvdd.cat", include_bytes!("../assets/mttvdd/mttvdd.cat")),
-        (
-            "vdd_settings.xml",
-            include_bytes!("../assets/mttvdd/vdd_settings.xml"),
-        ),
         ("LICENSE", include_bytes!("../assets/mttvdd/LICENSE")),
     ];
     for (name, data) in FILES {
@@ -238,10 +298,26 @@ pub fn install() -> io::Result<String> {
             Err(e) => return Err(e),
         }
     }
+    update_modes(&dir)?;
     configure_directory(&dir)?;
     if register(&dir.join("MttVDD.inf"))? {
         Ok("虚拟屏组件已安装。Windows 要求重启电脑后使用。".into())
     } else {
         Ok("虚拟屏组件已安装。请从安卓打开桌面，再从主机菜单开启隐私。".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn installer_adds_each_connected_desktop_size_once_and_preserves_existing_modes() {
+        let sizes = [(3840, 2160), (1600, 2560), (3440, 1440), (1600, 2560)];
+        let updated = settings_with_modes(DEFAULT_SETTINGS, &sizes).unwrap();
+        assert_eq!(updated.matches("<width>1600</width>").count(), 1);
+        assert_eq!(updated.matches("<width>3840</width>").count(), 1);
+        assert!(updated.contains("<width>3440</width><height>1440</height>"));
+        assert_eq!(settings_with_modes(&updated, &sizes).unwrap(), updated);
     }
 }

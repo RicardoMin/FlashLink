@@ -31,7 +31,7 @@ OBSERVATIONS = {
     "audio": "从首句语音开始，声音连续、左右声道正确，且与画面同步吗？",
     "privacy": "开启隐私后，每块物理屏都看不到桌面，而平板仍能正常翻页吗？",
     "reconnect": "短时断开 Wi-Fi 再恢复，能自动回到同一会话吗？",
-    "lock_before_restore": "持续断网直到超时，物理屏恢复时最先看到的是 Windows 锁屏吗？",
+    "desktop_after_restore": "持续断网直到超时，串流是否结束且实体屏恢复当前桌面？",
 }
 HOST_MARKERS = {
     "connect_events": "CLIENT CONNECTED",
@@ -264,10 +264,24 @@ def privacy_events(log):
         lines = file.read().decode("ascii", errors="replace").splitlines()[-256:]
     events = []
     for line in lines:
-        match = re.fullmatch(r"(\d{1,12})\s+(private|lost|resumed|locking|locked|restored|restore_pending)", line)
+        match = re.fullmatch(r"(\d{1,12})\s+(private|lost|resumed|locking|locked|restored|restore_pending|display_reapplied|guard_(?:pipe_closed|display_changed|display_timeout|display_without_lease|desktop_unavailable|engine_exited|lease_expired|user_end|owner_unavailable|management_unavailable))", line)
         if match:
             events.append({"unix_seconds": int(match[1]), "event": match[2]})
     return events
+
+
+def privacy_display_log(log):
+    if not log:
+        return []
+    path = log.with_name("privacy-display.log")
+    if not path.is_file():
+        return []
+    with path.open("rb") as file:
+        size = file.seek(0, os.SEEK_END)
+        file.seek(max(0, size - 32768))
+        lines = file.read().decode("ascii", errors="replace").splitlines()[-256:]
+    pattern = re.compile(r"^\d{1,12}\s+phase=[a-z_]+(?:\s+[a-z_]+=[-0-9a-zA-Z_,/:]+)+$")
+    return [line for line in lines if pattern.fullmatch(line)]
 
 
 def field(args):
@@ -281,6 +295,10 @@ def field(args):
         privacy = privacy_events(path)
     except OSError:
         privacy = []
+    try:
+        display_log = privacy_display_log(path)
+    except OSError:
+        display_log = []
     android = {"status": "not_requested"}
     if args.android:
         adb = os.environ.get("ADB") or shutil.which("adb")
@@ -304,7 +322,7 @@ def field(args):
                     seen[key] = {"y": "passed", "n": "failed", "": "not_tested"}[value]
                     break
     host["platform"] = args.host_platform or ("windows" if os.name == "nt" and args.host_log is None else "unknown")
-    return {"host": host, "previous_stream_log": previous, "privacy_events": privacy, "android": android, "observations": seen}
+    return {"host": host, "previous_stream_log": previous, "privacy_events": privacy, "privacy_display_log": display_log, "android": android, "observations": seen}
 
 
 def main():
