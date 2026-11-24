@@ -134,7 +134,8 @@ def development():
     test_java = android / "test/java/com/limelight"
     with tempfile.TemporaryDirectory() as java_classes:
         for check_name, name in (("android_recovery", "FlashLinkReconnect"),
-                                 ("android_touch", "FlashLinkTouchGesture")):
+                                 ("android_touch", "FlashLinkTouchGesture"),
+                                 ("android_quality", "FlashLinkQuality")):
             compile_check = check_name + "_compile"
             check(compile_check, [jdk_tool("javac"), "-sourcepath", android / "main/java", "-d", java_classes,
                   main_java / (name + ".java"), test_java / (name + "Test.java")])

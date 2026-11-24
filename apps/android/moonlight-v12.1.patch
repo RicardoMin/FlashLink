@@ -143,10 +143,63 @@ index 7be9a20..4e5f545 100644
              android:name=".Game"
              android:configChanges="mcc|mnc|locale|touchscreen|keyboard|keyboardHidden|navigation|screenLayout|fontScale|uiMode|orientation|screenSize|smallestScreenSize|layoutDirection"
 diff --git a/app/src/main/java/com/limelight/binding/video/MediaCodecDecoderRenderer.java b/app/src/main/java/com/limelight/binding/video/MediaCodecDecoderRenderer.java
-index 9bda0e6..f3d79ec 100644
+index 9bda0e6..0a3fd19 100644
 --- a/app/src/main/java/com/limelight/binding/video/MediaCodecDecoderRenderer.java
 +++ b/app/src/main/java/com/limelight/binding/video/MediaCodecDecoderRenderer.java
-@@ -1425,5 +1425,11 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
+@@ -98,6 +98,7 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
+
+     private MediaFormat inputFormat;
+     private MediaFormat outputFormat;
++    private boolean firstFrameSubmitted;
+     private MediaFormat configuredFormat;
+
+     private boolean needsBaselineSpsHack;
+@@ -1003,7 +1004,7 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
+                     }
+
+                     lastRenderedFrameTimeNanos = frameTimeNanos;
+-                    activeWindowVideoStats.totalFramesRendered++;
++                    frameSubmitted();
+                 } catch (IllegalStateException ignored) {
+                     try {
+                         // Try to avoid leaking the output buffer by releasing it without rendering
+@@ -1045,6 +1046,25 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
+         });
+     }
+
++    private static int visibleSize(MediaFormat format, String size, String start, String end, int fallback) {
++        if (format == null) return fallback;
++        if (format.containsKey(start) && format.containsKey(end)) {
++            return format.getInteger(end) - format.getInteger(start) + 1;
++        }
++        return format.containsKey(size) ? format.getInteger(size) : fallback;
++    }
++
++    private void frameSubmitted() {
++        activeWindowVideoStats.totalFramesRendered++;
++        if (!firstFrameSubmitted) {
++            firstFrameSubmitted = true;
++            MediaFormat format = outputFormat;
++            int width = visibleSize(format, MediaFormat.KEY_WIDTH, "crop-left", "crop-right", initialWidth);
++            int height = visibleSize(format, MediaFormat.KEY_HEIGHT, "crop-top", "crop-bottom", initialHeight);
++            perfListener.onFirstFrameSubmitted(width, height, refreshRate);
++        }
++    }
++
+     private void startRendererThread()
+     {
+         rendererThread = new Thread() {
+@@ -1095,7 +1115,7 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
+                                     }
+                                 }
+
+-                                activeWindowVideoStats.totalFramesRendered++;
++                                frameSubmitted();
+                             }
+                             else {
+                                 // For balanced frame pacing case, the Choreographer callback will handle rendering.
+@@ -1424,6 +1444,12 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
+
          // Flip stats windows roughly every second
          if (SystemClock.uptimeMillis() >= activeWindowVideoStats.measurementStartTimestamp + 1000) {
 +            // Sample the same completed window as the on-screen overlay, even with the UI hidden.
@@ -415,7 +468,7 @@ index 15de902..5c82cb0 100644
  zipStoreBase=GRADLE_USER_HOME
  zipStorePath=wrapper/dists
 diff --git a/app/src/main/java/com/limelight/Game.java b/app/src/main/java/com/limelight/Game.java
-index 42bc0c7..994db8b 100644
+index 42bc0c7..e77fdf2 100644
 --- a/app/src/main/java/com/limelight/Game.java
 +++ b/app/src/main/java/com/limelight/Game.java
 @@ -96,7 +96,8 @@ public class Game extends Activity implements SurfaceHolder.Callback,
@@ -428,7 +481,41 @@ index 42bc0c7..994db8b 100644
 
      private static final int REFERENCE_HORIZ_RES = 1280;
      private static final int REFERENCE_VERT_RES = 720;
-@@ -494,17 +495,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
+@@ -119,6 +120,8 @@ public class Game extends Activity implements SurfaceHolder.Callback,
+     private NvConnection conn;
+     private SpinnerDialog spinner;
+     private boolean displayedFailureDialog = false;
++    private boolean stopInProgress;
++    private Runnable afterStop;
+     private boolean connecting = false;
+     private boolean connected = false;
+     private boolean autoEnterPip = false;
+@@ -219,6 +222,13 @@ public class Game extends Activity implements SurfaceHolder.Callback,
+
+         // Read the stream preferences
+         prefConfig = PreferenceConfiguration.readPreferences(this);
++        FlashLinkQuality override = FlashLinkQuality.fromArray(getIntent().getIntArrayExtra(FlashLinkQuality.EXTRA));
++        if (override != null) {
++            prefConfig.width = override.width;
++            prefConfig.height = override.height;
++            prefConfig.fps = override.fps;
++            prefConfig.bitrate = override.bitrateKbps;
++        }
+         tombstonePrefs = Game.this.getSharedPreferences("DecoderTombstone", 0);
+
+         // Enter landscape unless we're on a square screen
+@@ -457,6 +467,10 @@ public class Game extends Activity implements SurfaceHolder.Callback,
+                     prefConfig.framePacing = PreferenceConfiguration.FRAME_PACING_BALANCED;
+                     LimeLog.info("Bogus refresh rate: " + roundedRefreshRate);
+                 }
++                else if (override != null) {
++                    // An explicit in-stream selection requests this exact wire rate for this session.
++                    prefConfig.framePacing = PreferenceConfiguration.FRAME_PACING_BALANCED;
++                }
+                 else {
+                     chosenFrameRate = roundedRefreshRate - 1;
+                     LimeLog.info("Adjusting FPS target for screen to " + chosenFrameRate);
+@@ -494,17 +508,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
          InputManager inputManager = (InputManager) getSystemService(Context.INPUT_SERVICE);
          inputManager.registerInputDeviceListener(keyboardTranslator, null);
 
@@ -447,7 +534,20 @@ index 42bc0c7..994db8b 100644
 
          if (prefConfig.onscreenController) {
              // create virtual onscreen controller
-@@ -1186,6 +1177,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
+@@ -527,6 +531,12 @@ public class Game extends Activity implements SurfaceHolder.Callback,
+                 spinner = null;
+             }
+
++            if (override != null) {
++                // onCreate() must finish initializing the activity's quality transition first.
++                streamView.post(() -> stageFailed("H.264 硬件解码器不可用", 0, 0));
++                return;
++            }
++
+             // If we can't find an AVC decoder, we can't proceed
+             Dialog.displayDialog(this, getResources().getString(R.string.conn_error_title),
+                     "This device or ROM doesn't support hardware accelerated H.264 playback.", true);
+@@ -1186,6 +1196,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
              }
          }
          else {
@@ -455,7 +555,7 @@ index 42bc0c7..994db8b 100644
              inputCaptureProvider.disableCapture();
          }
 
-@@ -1502,6 +1494,47 @@ public class Game extends Activity implements SurfaceHolder.Callback,
+@@ -1502,6 +1513,47 @@ public class Game extends Activity implements SurfaceHolder.Callback,
          return true;
      }
 
@@ -503,7 +603,7 @@ index 42bc0c7..994db8b 100644
      private TouchContext getTouchContext(int actionIndex)
      {
          if (actionIndex < touchContextMap.length) {
-@@ -1567,8 +1600,8 @@ public class Game extends Activity implements SurfaceHolder.Callback,
+@@ -1567,8 +1619,8 @@ public class Game extends Activity implements SurfaceHolder.Callback,
          // For the containing background view, we must subtract the origin
          // of the StreamView to get video-relative coordinates.
          if (view != streamView) {
@@ -514,7 +614,7 @@ index 42bc0c7..994db8b 100644
          }
 
          normalizedX = Math.max(normalizedX, 0.0f);
-@@ -2015,6 +2048,38 @@ public class Game extends Activity implements SurfaceHolder.Callback,
+@@ -2015,6 +2067,38 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                      return true;
                  }
 
@@ -553,7 +653,7 @@ index 42bc0c7..994db8b 100644
                  // If this is the parent view, we'll offset our coordinates to appear as if they
                  // are relative to the StreamView like our StreamView touch events are.
                  float xOffset, yOffset;
-@@ -2032,21 +2097,6 @@ public class Game extends Activity implements SurfaceHolder.Callback,
+@@ -2032,21 +2116,6 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                  int eventX = (int)(event.getX(actionIndex) + xOffset);
                  int eventY = (int)(event.getY(actionIndex) + yOffset);
 
@@ -575,7 +675,7 @@ index 42bc0c7..994db8b 100644
                  // TODO: Re-enable native touch when have a better solution for handling
                  // cancelled touches from Android gestures and 3 finger taps to activate
                  // the software keyboard.
-@@ -2072,16 +2122,6 @@ public class Game extends Activity implements SurfaceHolder.Callback,
+@@ -2072,16 +2141,6 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                      break;
                  case MotionEvent.ACTION_POINTER_UP:
                  case MotionEvent.ACTION_UP:
@@ -592,7 +692,7 @@ index 42bc0c7..994db8b 100644
                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && (event.getFlags() & MotionEvent.FLAG_CANCELED) != 0) {
                          context.cancelTouch();
                      }
-@@ -2165,8 +2205,8 @@ public class Game extends Activity implements SurfaceHolder.Callback,
+@@ -2165,8 +2224,8 @@ public class Game extends Activity implements SurfaceHolder.Callback,
          else {
              // For the containing background view, we must subtract the origin
              // of the StreamView to get video-relative coordinates.
@@ -603,6 +703,94 @@ index 42bc0c7..994db8b 100644
          }
 
          if (event.getPointerCount() == 1 && event.getActionIndex() == 0 &&
+@@ -2226,13 +2285,17 @@ public class Game extends Activity implements SurfaceHolder.Callback,
+         return handleMotionEvent(view, event);
+     }
+
++    protected String stageProgressMessage(String stage) {
++        return getResources().getString(R.string.conn_starting) + " " + stage;
++    }
++
+     @Override
+     public void stageStarting(final String stage) {
+         runOnUiThread(new Runnable() {
+             @Override
+             public void run() {
+                 if (spinner != null) {
+-                    spinner.setMessage(getResources().getString(R.string.conn_starting) + " " + stage);
++                    spinner.setMessage(stageProgressMessage(stage));
+                 }
+             }
+         });
+@@ -2242,8 +2305,29 @@ public class Game extends Activity implements SurfaceHolder.Callback,
+     public void stageComplete(String stage) {
+     }
+
++    @Override public void onFirstFrameSubmitted(int width, int height, int fps) {
++        FlashLinkQuality active = new FlashLinkQuality(width, height, fps, prefConfig.bitrate);
++        runOnUiThread(() -> {
++            if ((connecting || connected) && !stopInProgress && !isFinishing()) onStreamFrameReady(active);
++        });
++    }
++
++    protected void onStreamFrameReady(FlashLinkQuality active) {}
++
++    protected final void rememberStreamQuality(FlashLinkQuality quality) {
++        PreferenceConfiguration.saveStreamQuality(this, quality.width, quality.height, quality.fps, quality.bitrateKbps);
++    }
++
+     private void stopConnection() {
++        stopConnectionForQuality(null);
++    }
++
++    protected final void stopConnectionForQuality(Runnable stopped) {
++        // All callers are on the UI thread. The result callback follows native teardown.
++        if (stopped != null) afterStop = stopped;
++        if (stopInProgress) return;
+         if (connecting || connected) {
++            stopInProgress = true;
+             connecting = connected = false;
+             updatePipAutoEnter();
+
+@@ -2260,9 +2344,22 @@ public class Game extends Activity implements SurfaceHolder.Callback,
+             new Thread() {
+                 public void run() {
+                     conn.stop();
++                    runOnUiThread(() -> {
++                        stopInProgress = false;
++                        deliverStopCallback();
++                    });
+                 }
+             }.start();
+         }
++        else {
++            deliverStopCallback();
++        }
++    }
++
++    private void deliverStopCallback() {
++        Runnable callback = afterStop;
++        afterStop = null;
++        if (callback != null) callback.run();
+     }
+
+     @Override
+@@ -2428,6 +2525,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
+                     spinner = null;
+                 }
+
++                if (!connecting || isFinishing()) return;
+                 connected = true;
+                 connecting = false;
+                 updatePipAutoEnter();
+@@ -2527,6 +2625,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
+
+         if (!attemptedConnection) {
+             attemptedConnection = true;
++            connecting = true;
+
+             // Update GameManager state to indicate we're "loading" while connecting
+             UiHelper.notifyStreamConnecting(Game.this);
 diff --git a/app/src/main/java/com/limelight/binding/input/touch/RelativeTouchContext.java b/app/src/main/java/com/limelight/binding/input/touch/RelativeTouchContext.java
 index 7ed8f09..22b65c8 100644
 --- a/app/src/main/java/com/limelight/binding/input/touch/RelativeTouchContext.java
@@ -690,7 +878,7 @@ index 7ed8f09..22b65c8 100644
          }
      }
 diff --git a/app/src/main/java/com/limelight/preferences/PreferenceConfiguration.java b/app/src/main/java/com/limelight/preferences/PreferenceConfiguration.java
-index e0ba76e..44b7707 100644
+index e0ba76e..492c7c8 100644
 --- a/app/src/main/java/com/limelight/preferences/PreferenceConfiguration.java
 +++ b/app/src/main/java/com/limelight/preferences/PreferenceConfiguration.java
 @@ -57,7 +57,7 @@ public class PreferenceConfiguration {
@@ -711,6 +899,21 @@ index e0ba76e..44b7707 100644
      private static final String DEFAULT_AUDIO_CONFIG = "2"; // Stereo
      private static final boolean DEFAULT_LATENCY_TOAST = false;
      private static final String DEFAULT_FRAME_PACING = "latency";
+@@ -336,6 +336,14 @@ public class PreferenceConfiguration {
+         return context.getResources().getConfiguration().smallestScreenWidthDp < 500;
+     }
+
++    public static void saveStreamQuality(Context context, int width, int height, int fps, int bitrateKbps) {
++        PreferenceManager.getDefaultSharedPreferences(context).edit()
++                .putString(RESOLUTION_PREF_STRING, width + "x" + height)
++                .putString(FPS_PREF_STRING, Integer.toString(fps))
++                .putInt(BITRATE_PREF_STRING, bitrateKbps)
++                .apply();
++    }
++
+     public static int getDefaultBitrate(Context context) {
+         SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(context);
+         return getDefaultBitrate(
 diff --git a/app/src/main/res/xml/preferences.xml b/app/src/main/res/xml/preferences.xml
 index d68c8c5..b635a90 100644
 --- a/app/src/main/res/xml/preferences.xml
@@ -728,3 +931,115 @@ index d68c8c5..b635a90 100644
          <CheckBoxPreference
              android:key="checkbox_mouse_nav_buttons"
              android:title="@string/title_checkbox_mouse_nav_buttons"
+diff --git a/app/src/main/java/com/limelight/binding/video/PerfOverlayListener.java b/app/src/main/java/com/limelight/binding/video/PerfOverlayListener.java
+index 281f95a..980b951 100644
+--- a/app/src/main/java/com/limelight/binding/video/PerfOverlayListener.java
++++ b/app/src/main/java/com/limelight/binding/video/PerfOverlayListener.java
+@@ -1,5 +1,6 @@
+ package com.limelight.binding.video;
+
+ public interface PerfOverlayListener {
++    void onFirstFrameSubmitted(int width, int height, int fps);
+     void onPerfUpdate(final String text);
+ }
+diff --git a/app/src/main/java/com/limelight/nvstream/NvConnection.java b/app/src/main/java/com/limelight/nvstream/NvConnection.java
+index f892e9f..a5631b1 100644
+--- a/app/src/main/java/com/limelight/nvstream/NvConnection.java
++++ b/app/src/main/java/com/limelight/nvstream/NvConnection.java
+@@ -45,6 +45,9 @@ public class NvConnection {
+     private LimelightCryptoProvider cryptoProvider;
+     private String uniqueId;
+     private ConnectionContext context;
++    // Guard each instance's ownership of the process-wide native connection under its own lock.
++    private boolean stopRequested, ownsNative;
++    private NvHTTP pendingHttp;
+     private static Semaphore connectionAllowed = new Semaphore(1);
+     private final boolean isMonkey;
+     private final Context appContext;
+@@ -87,17 +90,28 @@ public class NvConnection {
+     }
+
+     public void stop() {
+-        // Interrupt any pending connection. This is thread-safe.
+-        MoonBridge.interruptConnection();
++        synchronized (this) {
++            stopRequested = true;
++            if (pendingHttp != null) pendingHttp.cancelFlashLinkRequests();
++            if (!ownsNative) return;
++            MoonBridge.interruptConnection();
++        }
+
+         // Moonlight-core is not thread-safe with respect to connection start and stop, so
+         // we must not invoke that functionality in parallel.
+         synchronized (MoonBridge.class) {
++            synchronized (this) {
++                // A failed startup may have already cleaned up while we waited.
++                if (!ownsNative) return;
++            }
+             MoonBridge.stopConnection();
+             MoonBridge.cleanupBridge();
++            releaseNativeConnection();
+         }
++    }
+
+-        // Now a pending connection can be processed
++    private synchronized void releaseNativeConnection() {
++        ownsNative = false;
+         connectionAllowed.release();
+     }
+
+@@ -223,4 +237,8 @@ public class NvConnection {
+     {
+         NvHTTP h = new NvHTTP(context.serverAddress, context.httpsPort, uniqueId, context.serverCert, cryptoProvider);
+
++        synchronized (this) {
++            if (stopRequested) return false;
++            pendingHttp = h;
++        }
+         String serverInfo = h.getServerInfo(true);
+@@ -315,6 +333,9 @@ public class NvConnection {
+                         context.connListener.displayMessage("Failed to resume existing session");
+                         return false;
+                     }
++                } else if ("Desktop".equals(app.getAppName())) {
++                    context.connListener.displayMessage("电脑正在串流另一个应用，请先在电脑上结束该会话。");
++                    return false;
+                 } else {
+                     return quitAndLaunch(h, context);
+                 }
+@@ -408,6 +429,11 @@ public class NvConnection {
+                     return;
+                 }
+
++                synchronized (NvConnection.this) {
++                    pendingHttp = null;
++                    if (stopRequested) return;
++                }
++
+                 ByteBuffer ib = ByteBuffer.allocate(16);
+                 ib.putInt(context.riKeyId);
+
+@@ -424,6 +450,13 @@ public class NvConnection {
+                 // Moonlight-core is not thread-safe with respect to connection start and stop, so
+                 // we must not invoke that functionality in parallel.
+                 synchronized (MoonBridge.class) {
++                    synchronized (NvConnection.this) {
++                        if (stopRequested) {
++                            connectionAllowed.release();
++                            return;
++                        }
++                        ownsNative = true;
++                    }
+                     MoonBridge.setupBridge(videoDecoderRenderer, audioRenderer, connectionListener);
+                     int ret = MoonBridge.startConnection(context.serverAddress.address,
+                             context.serverAppVersion, context.serverGfeVersion, context.rtspSessionUrl,
+@@ -442,7 +475,8 @@ public class NvConnection {
+                         // LiStartConnection() failed, so the caller is not expected
+                         // to stop the connection themselves. We need to release their
+                         // semaphore count for them.
+-                        connectionAllowed.release();
++                        MoonBridge.cleanupBridge();
++                        releaseNativeConnection();
+                         return;
+                     }
+                 }

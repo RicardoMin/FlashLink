@@ -9,10 +9,15 @@ import android.os.Handler;
 import android.os.SystemClock;
 import android.preference.PreferenceManager;
 import android.util.Log;
+import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
+import android.widget.FrameLayout;
+import android.widget.TextView;
+import android.widget.Toast;
 
 import com.limelight.nvstream.NvConnection;
+import com.limelight.nvstream.jni.MoonBridge;
 import com.limelight.preferences.PreferenceConfiguration;
 
 /** Thin shell around Moonlight's real Activity and its native callbacks. */
@@ -20,6 +25,14 @@ public final class FlashLinkGame extends Game {
     static final String DEADLINE = "dev.flashlink.recoveryDeadline";
     static final int NETWORK_LOST = RESULT_FIRST_USER + 1;
     static final int EXPIRED = RESULT_FIRST_USER + 2;
+    static final int QUALITY_CHANGE = RESULT_FIRST_USER + 3;
+    static final int QUALITY_FAILED = RESULT_FIRST_USER + 4;
+    static final String PREVIOUS_QUALITY = "dev.flashlink.previousQuality";
+    static final String FAILURE = "dev.flashlink.qualityFailure";
+    static final String RESTORE_FAILURE = "dev.flashlink.restoreFailure";
+    static final String RESTORING = "dev.flashlink.restoringQuality";
+    static final String RESTORE_UNTIL = "dev.flashlink.restoreUntil";
+    static final String RETRYABLE = "dev.flashlink.retryable";
     static final String LOG = "FlashLinkSession";
     private final Handler timer = new Handler();
     private final Runnable expire = () -> endWith(EXPIRED, 0);
@@ -29,19 +42,32 @@ public final class FlashLinkGame extends Game {
     private FlashLinkStreamTools tools;
     private FlashLinkStreamTouch streamTouch;
     private FlashLinkPrivacyLease privacyLease;
+    private FlashLinkQuality activeQuality;
+    private volatile FlashLinkQuality pendingQuality;
+    private volatile boolean handingOff;
+    private volatile String negotiationProblem;
+    private TextView qualityProgress;
+    private final Runnable qualityTimeout = () -> qualityFailed("等待电脑连接并传回第一帧画面超时。", true);
 
     @Override protected void onCreate(Bundle state) {
+        pendingQuality = FlashLinkQuality.fromArray(getIntent().getIntArrayExtra(FlashLinkQuality.EXTRA));
         super.onCreate(state);
         recoveryDeadline = getIntent().getLongExtra(DEADLINE, 0);
         if (recoveryDeadline > 0) {
             timer.postDelayed(expire, Math.max(0, recoveryDeadline - SystemClock.elapsedRealtime()));
+        }
+        if (pendingQuality != null && !isFinishing()) {
+            showQualityProgress(isRestoring() ? "正在恢复上次画质…" : "正在应用画质，等待电脑画面…");
+            long timeout = isRestoring() ? getIntent().getLongExtra(RESTORE_UNTIL, 0) - SystemClock.elapsedRealtime()
+                    : FlashLinkReconnect.WINDOW_MS;
+            timer.postDelayed(qualityTimeout, Math.max(0, timeout));
         }
     }
 
     @Override public void connectionStarted() {
         super.connectionStarted();
         runOnUiThread(() -> {
-            if (isFinishing() || isDestroyed()) return;
+            if (handingOff || isFinishing() || isDestroyed()) return;
             startedAt = SystemClock.elapsedRealtime();
             if (recoveryDeadline > 0 && startedAt >= recoveryDeadline) {
                 expire.run();
@@ -52,28 +78,124 @@ public final class FlashLinkGame extends Game {
             privacyLease = FlashLinkPrivacyLease.start(this, getIntent().getStringExtra(EXTRA_HOST),
                     getIntent().getIntExtra(EXTRA_PORT, com.limelight.nvstream.http.NvHTTP.DEFAULT_HTTP_PORT),
                     getIntent().getByteArrayExtra(EXTRA_SERVER_CERT));
-            tools = new FlashLinkStreamTools(this);
-            tools.attach();
+            streamReady();
         });
+    }
+
+    @Override protected void onStreamFrameReady(FlashLinkQuality active) {
+        activeQuality = active;
+        streamReady();
+    }
+
+    private void streamReady() {
+        if (startedAt == 0 || activeQuality == null || tools != null || handingOff || isFinishing() || isDestroyed()) return;
+        if (pendingQuality != null) {
+            if (isRestoring() && SystemClock.elapsedRealtime() >= getIntent().getLongExtra(RESTORE_UNTIL, 0)) {
+                qualityTimeout.run();
+                return;
+            }
+            if (!pendingQuality.equals(activeQuality)) {
+                qualityFailed("电脑协商的参数为 " + activeQuality.displayText() + "，与所选画质不一致。", false);
+                return;
+            }
+            timer.removeCallbacks(qualityTimeout);
+            if (isRestoring()) {
+                Toast.makeText(this, lastQualityFailure() + "\n已恢复上次画质。", Toast.LENGTH_LONG).show();
+            } else {
+                rememberStreamQuality(activeQuality);
+                Toast.makeText(this, "画质已切换至 " + activeQuality.displayText(), Toast.LENGTH_SHORT).show();
+            }
+            Log.i(LOG, (isRestoring() ? "QUALITY_RESTORED " : "QUALITY_APPLIED ") + activeQuality.displayText());
+            pendingQuality = null;
+            qualityProgress.setVisibility(View.GONE);
+        }
+        tools = new FlashLinkStreamTools(this);
+        tools.attach();
+    }
+
+    FlashLinkQuality currentQuality() { return activeQuality; }
+    String lastQualityFailure() { return isRestoring() ? getIntent().getStringExtra(FAILURE) : null; }
+
+    void applyQuality(FlashLinkQuality selected) {
+        if (tools == null || activeQuality == null || selected.equals(activeQuality) || handingOff) return;
+        Intent next = new Intent(getIntent());
+        next.putExtra(FlashLinkQuality.EXTRA, selected.toArray());
+        next.putExtra(PREVIOUS_QUALITY, activeQuality.toArray());
+        next.removeExtra(RESTORING);
+        next.removeExtra(FAILURE);
+        next.removeExtra(RESTORE_FAILURE);
+        next.removeExtra(DEADLINE);
+        showQualityProgress("正在切换到 " + selected.displayText() + "…");
+        handOffQuality(QUALITY_CHANGE, next);
+    }
+
+    private boolean isRestoring() { return getIntent().getBooleanExtra(RESTORING, false); }
+
+    private void showQualityProgress(String message) {
+        if (qualityProgress == null) {
+            qualityProgress = new TextView(this);
+            int inset = Math.round(12 * getResources().getDisplayMetrics().density);
+            qualityProgress.setPadding(inset, inset, inset, inset);
+            qualityProgress.setTextColor(android.graphics.Color.WHITE);
+            qualityProgress.setBackgroundColor(0xdf202833);
+            addContentView(qualityProgress, new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER));
+        }
+        qualityProgress.setText(message);
+        qualityProgress.setVisibility(View.VISIBLE);
+    }
+
+    private void qualityFailed(String reason, boolean retryable) {
+        if (pendingQuality == null || handingOff || isFinishing() || isDestroyed()) return;
+        showQualityProgress(reason);
+        Log.i(LOG, "QUALITY_FAILED");
+        handOffQuality(QUALITY_FAILED, new Intent(getIntent()).putExtra(isRestoring() ? RESTORE_FAILURE : FAILURE, reason)
+                .putExtra(RETRYABLE, retryable));
+    }
+
+    private void handOffQuality(int result, Intent next) {
+        handingOff = true;
+        timer.removeCallbacks(qualityTimeout);
+        releaseControls();
+        if (tools != null) tools.setVisible(false);
+        // The native stop is asynchronous. Wait for teardown before another player starts /resume.
+        stopConnectionForQuality(() -> {
+            if (isFinishing() || isDestroyed()) return;
+            setResult(result, next);
+            finish();
+        });
+    }
+
+    @Override protected String stageProgressMessage(String stage) {
+        if (pendingQuality != null) {
+            return isRestoring() ? "正在恢复上次画质…" : "正在协商新的串流画质…";
+        }
+        return super.stageProgressMessage(stage);
+    }
+
+    @Override public void displayMessage(String message) {
+        if (pendingQuality == null) super.displayMessage(message);
+        else negotiationProblem = message;
     }
 
     @Override public void connectionTerminated(int code) {
         runOnUiThread(() -> {
+            if (handingOff || isFinishing() || isDestroyed()) return;
             releaseControls();
             closeLease();
-        });
-        if (!FlashLinkReconnect.transportLost(code)) {
-            timer.removeCallbacks(expire);
-            super.connectionTerminated(code);
-            return;
-        }
-        runOnUiThread(() -> {
-            if (!foreground || isFinishing() || isDestroyed()) return;
-            if (startedAt == 0 && recoveryDeadline == 0) {
-                // Initial launch never established a stream. Keep the native error screen.
+            // Decide alongside the first-frame callback: it may already have committed this profile.
+            if (pendingQuality != null) {
+                qualityFailed(code == MoonBridge.ML_ERROR_NO_VIDEO_FRAME || code == MoonBridge.ML_ERROR_NO_VIDEO_TRAFFIC
+                        ? "电脑未能传回可播放的视频画面。" : "画质切换期间连接中断（" + code + "）。",
+                        FlashLinkReconnect.transportLost(code) || code == MoonBridge.ML_ERROR_NO_VIDEO_FRAME);
+                return;
+            }
+            if (!FlashLinkReconnect.transportLost(code) || (startedAt == 0 && recoveryDeadline == 0)) {
+                timer.removeCallbacks(expire);
+                // Upstream collects connectivity diagnostics before displaying its error screen.
                 new Thread(() -> super.connectionTerminated(code), "FlashLink stream error").start();
                 return;
             }
+            if (!foreground) return;
             long now = SystemClock.elapsedRealtime();
             long deadline = recoveryDeadline;
             if (deadline == 0 || (startedAt > 0 && now - startedAt >= FlashLinkReconnect.WINDOW_MS)) {
@@ -85,7 +207,14 @@ public final class FlashLinkGame extends Game {
     }
 
     @Override public void stageFailed(String stage, int ports, int error) {
-        if (recoveryDeadline > 0 && ports != 0 && (error == 0 || FlashLinkReconnect.transportLost(error))) {
+        if (handingOff || isFinishing()) return;
+        if (pendingQuality != null) {
+            String detail = negotiationProblem;
+            String reason = stage + " 阶段失败" + (error != 0 ? "（" + error + "）" : "") + "。";
+            boolean retryable = (ports != 0 && (error == 0 || FlashLinkReconnect.transportLost(error)))
+                    || error == 503;
+            runOnUiThread(() -> qualityFailed(detail == null || detail.isEmpty() ? reason : reason + detail, retryable));
+        } else if (recoveryDeadline > 0 && ports != 0 && (error == 0 || FlashLinkReconnect.transportLost(error))) {
             runOnUiThread(() -> { if (foreground) endWith(NETWORK_LOST, recoveryDeadline); });
         } else {
             timer.removeCallbacks(expire);
@@ -102,7 +231,7 @@ public final class FlashLinkGame extends Game {
 
     @Override protected boolean handleStreamFingerTouch(View source, View video, MotionEvent event,
                                                         NvConnection connection) {
-        if (tools == null || !foreground || !hasWindowFocus() || isFinishing()) return true;
+        if (tools == null || handingOff || !foreground || !hasWindowFocus() || isFinishing()) return true;
         if (streamTouch == null) streamTouch = new FlashLinkStreamTouch(this, video, connection);
         return streamTouch.onTouch(source, event, isTouchscreenTrackpad());
     }
@@ -176,7 +305,7 @@ public final class FlashLinkGame extends Game {
     @Override protected void onDestroy() {
         releaseControls();
         closeLease();
-        timer.removeCallbacks(expire);
+        timer.removeCallbacksAndMessages(null);
         super.onDestroy();
     }
 }

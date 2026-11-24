@@ -91,8 +91,8 @@ final class FlashLinkStreamTools {
         mouseOpen = mouse;
         panel.removeAllViews();
         if (mouse) mousePanel(); else keyPanel();
-        int height = Math.min(dp(mouse ? 245 : 207), Math.max(dp(96), layer.getHeight() - dp(74)));
-        FrameLayout.LayoutParams p = new FrameLayout.LayoutParams(Math.min(dp(240), layer.getWidth() - dp(24)),
+        int height = Math.min(dp(mouse ? 245 : 269), Math.max(dp(96), layer.getHeight() - dp(74)));
+        FrameLayout.LayoutParams p = new FrameLayout.LayoutParams(Math.min(dp(mouse ? 240 : 282), layer.getWidth() - dp(24)),
                 height, Gravity.TOP | (mouse ? Gravity.START : Gravity.END));
         p.setMargins(dp(12), dp(60), dp(12), dp(8));
         sheet.setLayoutParams(p);
@@ -183,6 +183,14 @@ final class FlashLinkStreamTools {
     }
 
     private void keyPanel() {
+        FlashLinkQuality active = game.currentQuality();
+        if (active != null) {
+            TextView quality = button("串流画质\n" + active.displayText(), () -> {
+                collapse();
+                new FlashLinkQualityDialog(game, active).show();
+            });
+            panel.addView(quality, new LinearLayout.LayoutParams(MATCH, dp(60)));
+        }
         LinearLayout row = row();
         item(row, "空格", () -> key(KeyEvent.KEYCODE_SPACE));
         item(row, "回车", () -> key(KeyEvent.KEYCODE_ENTER));
