@@ -756,7 +756,10 @@ fn export_report_to(directory: &Path, output_dir: Option<&Path>) -> Result<Strin
     if !result.status.success() {
         let stderr = String::from_utf8_lossy(&result.stderr);
         let detail = stderr.trim();
-        return Err(format!("PowerShell exited with {}: {detail}", result.status));
+        return Err(format!(
+            "PowerShell exited with {}: {detail}",
+            result.status
+        ));
     }
     Ok(String::from_utf8_lossy(&result.stdout).trim().to_owned())
 }
