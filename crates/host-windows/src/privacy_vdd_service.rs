@@ -13,10 +13,10 @@
 use super::{
     bundle, privacy_driver,
     privacy_vdd_protocol::{
-        apply_service_update, format_request, format_response, parse_request, parse_response,
-        service_command_line, LeaseAction, LeaseTracker, Request, Response, StopOutcome,
-        HELPER_EXE_NAME, MAX_LINE_BYTES, PIPE_NAME, PIPE_SDDL, SERVICE_DESCRIPTION,
-        SERVICE_DISPLAY_NAME, SERVICE_NAME,
+        apply_service_update, format_request, format_response, is_helper_current, parse_request,
+        parse_response, service_command_line, LeaseAction, LeaseTracker, Request, Response,
+        StopOutcome, HELPER_EXE_NAME, HELPER_PROTOCOL_VERSION, MAX_LINE_BYTES, PIPE_NAME, PIPE_SDDL,
+        SERVICE_DESCRIPTION, SERVICE_DISPLAY_NAME, SERVICE_NAME,
     },
 };
 use std::{
@@ -241,11 +241,11 @@ unsafe extern "system" fn service_ctrl_handler(
 }
 
 fn create_pipe_instance(first: bool) -> io::Result<OwnedHandle> {
-    create_pipe_instance_named(PIPE_NAME, first)
+    create_pipe_instance_named(PIPE_NAME, PIPE_SDDL, first)
 }
 
-fn create_pipe_instance_named(pipe_name: &str, first: bool) -> io::Result<OwnedHandle> {
-    let sddl = wide(PIPE_SDDL);
+fn create_pipe_instance_named(pipe_name: &str, sddl: &str, first: bool) -> io::Result<OwnedHandle> {
+    let sddl = wide(sddl);
     let mut sd: *mut c_void = ptr::null_mut();
     let ok = unsafe {
         ConvertStringSecurityDescriptorToSecurityDescriptorW(
@@ -437,7 +437,7 @@ fn handle_client(
                 let resp = if privacy_driver::uses_flashlink_directory()
                     && privacy_driver::is_mttvdd_present().unwrap_or(false)
                 {
-                    Response::Ready
+                    Response::Ready(HELPER_PROTOCOL_VERSION)
                 } else {
                     Response::Unmanaged
                 };
@@ -943,20 +943,24 @@ impl Drop for VddLease {
     }
 }
 
-/// Query whether `FlashLinkVddHelper` is running and actively managing
-/// FlashLink's `Root\MttVDD` installation.
+/// Query whether `FlashLinkVddHelper` is running at the current protocol/ACL
+/// revision and actively managing FlashLink's `Root\MttVDD` installation.
 pub fn is_ready() -> bool {
-    let Ok(Some(pipe)) = open_client_pipe() else {
+    is_ready_named(PIPE_NAME)
+}
+
+fn is_ready_named(pipe_name: &str) -> bool {
+    let Ok(Some(pipe)) = open_client_pipe_named(pipe_name) else {
         return false;
     };
     let raw = pipe.as_raw_handle();
     if write_sync(raw, format_request(Request::Status).as_bytes()).is_err() {
         return false;
     }
-    read_line_sync(raw)
+    let resp = read_line_sync(raw)
         .ok()
-        .and_then(|line| parse_response(&line))
-        == Some(Response::Ready)
+        .and_then(|line| parse_response(&line));
+    is_helper_current(resp.as_ref())
 }
 
 /// Best-effort recovery hook: if `FlashLinkVddHelper` is running and no active
@@ -1062,43 +1066,42 @@ mod tests {
         assert!(found_iu, "PIPE_SDDL must contain an Interactive Users ACE");
     }
 
-    #[test]
-    fn client_pipe_access_supports_duplex_round_trip() {
-        let pipe_name = format!(r"\\.\pipe\FlashLinkVddHelperAclTest-{}", std::process::id());
-        let server = create_pipe_instance_named(&pipe_name, true).unwrap();
+    fn serve_one_status_reply(
+        pipe_name: &str,
+        sddl: &str,
+        reply: String,
+    ) -> thread::JoinHandle<()> {
+        let server = create_pipe_instance_named(pipe_name, sddl, true).unwrap();
         let stop_event = create_event(true).unwrap();
-        let stop_raw = stop_event.as_raw_handle() as usize;
-        let handle = thread::spawn(move || {
+        thread::spawn(move || {
+            let raw = server.as_raw_handle();
+            let stop_raw = stop_event.as_raw_handle();
             let connect_ev = create_event(true).unwrap();
             let mut ov = OVERLAPPED::default();
             ov.hEvent = connect_ev.as_raw_handle();
-            let connected = unsafe { ConnectNamedPipe(server.as_raw_handle(), &mut ov) } != 0
+            let connected = unsafe { ConnectNamedPipe(raw, &mut ov) } != 0
                 || match io::Error::last_os_error().raw_os_error().map(|c| c as u32) {
                     Some(ERROR_PIPE_CONNECTED) => true,
-                    Some(ERROR_IO_PENDING) => wait_overlapped(
-                        server.as_raw_handle(),
-                        &ov,
-                        connect_ev.as_raw_handle(),
-                        stop_raw as HANDLE,
-                    )
-                    .is_ok(),
+                    Some(ERROR_IO_PENDING) => {
+                        wait_overlapped(raw, &ov, connect_ev.as_raw_handle(), stop_raw).is_ok()
+                    }
                     _ => false,
                 };
             assert!(connected);
-            let req = read_line_overlapped(server.as_raw_handle(), stop_raw as HANDLE)
-                .unwrap()
-                .unwrap();
+            let req = read_line_overlapped(raw, stop_raw).unwrap().unwrap();
             assert_eq!(parse_request(&req), Some(Request::Status));
-            write_all_overlapped(
-                server.as_raw_handle(),
-                format_response(&Response::Ready).as_bytes(),
-                stop_raw as HANDLE,
-            )
-            .unwrap();
+            write_all_overlapped(raw, reply.as_bytes(), stop_raw).unwrap();
             unsafe {
-                DisconnectNamedPipe(server.as_raw_handle());
+                DisconnectNamedPipe(raw);
             }
-        });
+        })
+    }
+
+    #[test]
+    fn client_pipe_access_supports_duplex_round_trip() {
+        let pipe_name = format!(r"\\.\pipe\FlashLinkVddHelperAclTest-{}", std::process::id());
+        let expected_wire = format_response(&Response::Ready(HELPER_PROTOCOL_VERSION));
+        let handle = serve_one_status_reply(&pipe_name, PIPE_SDDL, expected_wire);
 
         let client = open_client_pipe_named(&pipe_name).unwrap().unwrap();
         write_sync(
@@ -1107,7 +1110,26 @@ mod tests {
         )
         .unwrap();
         let resp = read_line_sync(client.as_raw_handle()).unwrap();
-        assert_eq!(parse_response(&resp), Some(Response::Ready));
+        assert_eq!(
+            parse_response(&resp),
+            Some(Response::Ready(HELPER_PROTOCOL_VERSION))
+        );
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn is_ready_rejects_legacy_unversioned_helper_and_accepts_current_helper() {
+        let pid = std::process::id();
+        let legacy_sddl = "D:(A;;GRGW;;;SY)(A;;GRGW;;;BA)(A;;GRGW;;;IU)";
+        let legacy_pipe = format!(r"\\.\pipe\FlashLinkVddHelperLegacyTest-{pid}");
+        let legacy_server = serve_one_status_reply(&legacy_pipe, legacy_sddl, "READY\n".into());
+        assert!(!is_ready_named(&legacy_pipe));
+        legacy_server.join().unwrap();
+
+        let current_pipe = format!(r"\\.\pipe\FlashLinkVddHelperCurrentTest-{pid}");
+        let current_wire = format_response(&Response::Ready(HELPER_PROTOCOL_VERSION));
+        let current_server = serve_one_status_reply(&current_pipe, PIPE_SDDL, current_wire);
+        assert!(is_ready_named(&current_pipe));
+        current_server.join().unwrap();
     }
 }

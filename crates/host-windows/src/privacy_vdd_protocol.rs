@@ -33,6 +33,10 @@ pub const CLIENT_PIPE_ACCESS: u32 = PIPE_RIGHT_READ_DATA
 /// `FILE_CREATE_PIPE_INSTANCE`.
 pub const PIPE_SDDL: &str = "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x00100083;;;IU)";
 pub const MAX_LINE_BYTES: usize = 128;
+/// Protocol/ACL revision reported by `STATUS`. Legacy PR test builds returned
+/// unversioned `"READY"` (treated as version 1) with a wider `GW` pipe ACL;
+/// bumping to version 2 forces `prepare()` to upgrade existing helper services.
+pub const HELPER_PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Request {
@@ -44,7 +48,7 @@ pub enum Request {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Response {
-    Ready,
+    Ready(u32),
     Unmanaged,
     Ok,
     Busy,
@@ -73,19 +77,29 @@ pub fn format_request(req: Request) -> &'static str {
 pub fn parse_response(line: &str) -> Option<Response> {
     let trimmed = line.trim();
     match trimmed {
-        "READY" => Some(Response::Ready),
+        "READY" => Some(Response::Ready(1)),
         "UNMANAGED" => Some(Response::Unmanaged),
         "OK" => Some(Response::Ok),
         "BUSY" => Some(Response::Busy),
-        _ => trimmed
-            .strip_prefix("ERR ")
-            .map(|msg| Response::Err(msg.to_string())),
+        _ => {
+            if let Some(version) = trimmed.strip_prefix("READY ") {
+                let parsed = version.parse::<u32>().ok().filter(|&v| v > 0)?;
+                return Some(Response::Ready(parsed));
+            }
+            trimmed
+                .strip_prefix("ERR ")
+                .map(|msg| Response::Err(msg.to_string()))
+        }
     }
+}
+
+pub fn is_helper_current(resp: Option<&Response>) -> bool {
+    matches!(resp, Some(Response::Ready(version)) if *version >= HELPER_PROTOCOL_VERSION)
 }
 
 pub fn format_response(resp: &Response) -> String {
     match resp {
-        Response::Ready => "READY\n".to_string(),
+        Response::Ready(version) => format!("READY {version}\n"),
         Response::Unmanaged => "UNMANAGED\n".to_string(),
         Response::Ok => "OK\n".to_string(),
         Response::Busy => "BUSY\n".to_string(),
@@ -283,7 +297,7 @@ mod tests {
         assert_eq!(parse_request(""), None);
 
         for resp in [
-            Response::Ready,
+            Response::Ready(HELPER_PROTOCOL_VERSION),
             Response::Unmanaged,
             Response::Ok,
             Response::Busy,
@@ -295,6 +309,22 @@ mod tests {
         }
         let sanitized = format_response(&Response::Err("line1\r\nline2".into()));
         assert_eq!(sanitized, "ERR line1  line2\n");
+    }
+
+    #[test]
+    fn legacy_unversioned_ready_response_triggers_helper_upgrade() {
+        let legacy = parse_response("READY\n");
+        assert_eq!(legacy, Some(Response::Ready(1)));
+        assert!(!is_helper_current(legacy.as_ref()));
+
+        let current = parse_response(&format!("READY {HELPER_PROTOCOL_VERSION}\n"));
+        assert_eq!(current, Some(Response::Ready(HELPER_PROTOCOL_VERSION)));
+        assert!(is_helper_current(current.as_ref()));
+
+        assert_eq!(parse_response("READY 0\n"), None);
+        assert_eq!(parse_response("READY abc\n"), None);
+        assert!(!is_helper_current(Some(&Response::Unmanaged)));
+        assert!(!is_helper_current(None));
     }
 
     #[test]
