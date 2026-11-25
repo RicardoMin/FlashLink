@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 package com.limelight;
 
 /** Host-JVM regression test for the exact recovery policy used by the Android APK. */

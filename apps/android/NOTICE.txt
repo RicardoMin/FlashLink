@@ -1,3 +1,12 @@
+FlashLink Android
+Copyright (c) 2026 FlashLink Contributors
+FlashLink is distributed under the GNU General Public License, version 3 only
+(GPL-3.0-only). See FlashLink-GPLv3.txt in assets/licenses. For portions
+previously released under MIT, the original notice is in FlashLink-MIT.txt.
+Third-party components retain their respective licenses and copyright notices.
+FlashLink source, patches and build instructions are in the same repository
+revision as the APK in install/ at https://github.com/RicardoMin/FlashLink.
+
 FlashLink Android integrates Moonlight Android v12.1 (GPLv3).
 Upstream source and copyright notices:
 https://github.com/moonlight-stream/moonlight-android/tree/1b1b100e63e8ffcf1496e324ff7b57ee9f2db2a9

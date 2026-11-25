@@ -59,6 +59,7 @@ def main():
         with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, strict_timestamps=False) as out:
             out.writestr("FlashLink.exe", host)
             out.write(ROOT/"LICENSE", "LICENSE")
+            out.write(ROOT/"LICENSES/FlashLink-MIT.txt", "licenses/FlashLink-MIT.txt")
             out.write(ASSETS/"NOTICE.txt", "NOTICE.txt")
             out.writestr("使用说明.txt", (ASSETS/"使用说明.txt").read_text(encoding="utf-8").replace("\n", "\r\n").encode("utf-8-sig"))
             out.write(ASSETS/"mttvdd/LICENSE", "licenses/MttVDD-LICENSE")

@@ -54,6 +54,8 @@ def prepare(output, origin):
             checkout.rename(host)
     assets = host / "app/src/main/assets/licenses"
     assets.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(ROOT / "LICENSE", assets / "FlashLink-GPLv3.txt")
+    shutil.copy2(ROOT / "LICENSES/FlashLink-MIT.txt", assets)
     shutil.copy2(host / "LICENSE.txt", assets / "Moonlight-GPLv3.txt")
     shutil.copy2(ANDROID / "NOTICE.txt", assets / "FlashLink-Moonlight.txt")
     return host

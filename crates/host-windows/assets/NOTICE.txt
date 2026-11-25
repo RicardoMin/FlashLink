@@ -1,8 +1,11 @@
 FlashLink Windows host
 
 FlashLink host and launcher
-  Copyright holders and MIT license: LICENSE
-  Project: https://github.com/RicardoMin/FlashLink
+  Copyright (c) 2026 FlashLink Contributors
+  GNU General Public License, version 3 only (GPL-3.0-only). See LICENSE.
+  For portions previously released under MIT, see licenses/FlashLink-MIT.txt.
+  FlashLink source and build instructions are in the same repository revision
+  as the Windows package in install/ at https://github.com/RicardoMin/FlashLink.
 
 Sunshine
   Developed by the Sunshine authors and contributors.
