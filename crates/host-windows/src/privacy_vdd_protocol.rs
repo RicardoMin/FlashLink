@@ -146,9 +146,108 @@ pub fn service_command_line(exe_path: &str) -> String {
     format!("\"{exe_path}\" --vdd-service")
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StopOutcome {
+    Stopped,
+    NotActive,
+}
+
+/// Safely orchestrate replacing an existing helper service binary:
+/// 1. When updating an existing service, confirm the service has reached `SERVICE_STOPPED`
+///    (or was already inactive) before touching the executable; any stop-wait timeout or
+///    status-query error is returned immediately without attempting replacement.
+/// 2. If binary replacement fails after stopping an active service, attempt to restart the
+///    previous service binary before returning the replacement error.
+pub fn apply_service_update<E>(
+    has_existing: bool,
+    stop_existing: impl FnOnce() -> Result<StopOutcome, E>,
+    replace_binary: impl FnOnce() -> Result<(), E>,
+    restart_existing: impl FnOnce(),
+) -> Result<(), E> {
+    let stopped_active = if has_existing {
+        stop_existing()? == StopOutcome::Stopped
+    } else {
+        false
+    };
+    if let Err(err) = replace_binary() {
+        if stopped_active {
+            restart_existing();
+        }
+        return Err(err);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn service_update_aborts_without_replacing_binary_when_stop_times_out() {
+        let mut replaced = false;
+        let mut restarted = false;
+        let result = apply_service_update(
+            true,
+            || Err("stop timed out"),
+            || {
+                replaced = true;
+                Ok(())
+            },
+            || {
+                restarted = true;
+            },
+        );
+        assert_eq!(result, Err("stop timed out"));
+        assert!(!replaced);
+        assert!(!restarted);
+    }
+
+    #[test]
+    fn service_update_restarts_previous_service_when_replace_fails_after_stop() {
+        let mut replaced = false;
+        let mut restarted = false;
+        let result = apply_service_update(
+            true,
+            || Ok(StopOutcome::Stopped),
+            || {
+                replaced = true;
+                Err("access denied")
+            },
+            || {
+                restarted = true;
+            },
+        );
+        assert_eq!(result, Err("access denied"));
+        assert!(replaced);
+        assert!(restarted);
+    }
+
+    #[test]
+    fn service_update_does_not_restart_when_previous_service_was_not_active() {
+        let mut restarted = false;
+        let result = apply_service_update(
+            true,
+            || Ok(StopOutcome::NotActive),
+            || Err("disk full"),
+            || {
+                restarted = true;
+            },
+        );
+        assert_eq!(result, Err("disk full"));
+        assert!(!restarted);
+
+        let mut fresh_restarted = false;
+        let fresh = apply_service_update(
+            false,
+            || unreachable!("fresh install must not stop a service"),
+            || Err("disk full"),
+            || {
+                fresh_restarted = true;
+            },
+        );
+        assert_eq!(fresh, Err("disk full"));
+        assert!(!fresh_restarted);
+    }
 
     #[test]
     fn round_trips_requests_and_responses() {

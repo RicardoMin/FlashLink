@@ -301,7 +301,7 @@ fn run_engine(
             ));
         }
     };
-    let mut nearby = Nearby::start(base, &name, &cert, &key).map_err(|e| {
+    let nearby = Nearby::start(base, &name, &cert, &key).map_err(|e| {
         format!("无法开启附近发现或安全配对。请关闭另一个 FlashLink 后重试。\r\n{e}")
     })?;
     let _ = ui.send(Event::Online {
@@ -311,6 +311,7 @@ fn run_engine(
     });
     setup.show(ui);
     let mut active: Option<(String, super::lan::Approval, Instant)> = None;
+    let mut audio = crate::audio::Playback::new(&nearby, ui);
     let mut next_poll = Instant::now();
     let mut next_deferred = Instant::now();
     let mut failures = 0;
@@ -482,6 +483,7 @@ fn run_engine(
             continue;
         }
         next_poll = Instant::now() + Duration::from_millis(650);
+        audio.poll();
         if let Some(owner) = requested_owner {
             if nearby
                 .heartbeat(&owner)

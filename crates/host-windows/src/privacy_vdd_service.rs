@@ -13,9 +13,10 @@
 use super::{
     bundle, privacy_driver,
     privacy_vdd_protocol::{
-        format_request, format_response, parse_request, parse_response, service_command_line,
-        LeaseAction, LeaseTracker, Request, Response, HELPER_EXE_NAME, MAX_LINE_BYTES, PIPE_NAME,
-        PIPE_SDDL, SERVICE_DESCRIPTION, SERVICE_DISPLAY_NAME, SERVICE_NAME,
+        apply_service_update, format_request, format_response, parse_request, parse_response,
+        service_command_line, LeaseAction, LeaseTracker, Request, Response, StopOutcome,
+        HELPER_EXE_NAME, MAX_LINE_BYTES, PIPE_NAME, PIPE_SDDL, SERVICE_DESCRIPTION,
+        SERVICE_DISPLAY_NAME, SERVICE_NAME,
     },
 };
 use std::{
@@ -37,8 +38,9 @@ use windows_sys::Win32::{
     Foundation::{
         LocalFree, ERROR_BROKEN_PIPE, ERROR_CALL_NOT_IMPLEMENTED, ERROR_FILE_NOT_FOUND,
         ERROR_IO_PENDING, ERROR_NO_MORE_ITEMS, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED,
-        ERROR_SERVICE_ALREADY_RUNNING, ERROR_SERVICE_DOES_NOT_EXIST, ERROR_SERVICE_NOT_ACTIVE,
-        GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, NO_ERROR, WAIT_OBJECT_0,
+        ERROR_SERVICE_ALREADY_RUNNING, ERROR_SERVICE_CANNOT_ACCEPT_CTRL,
+        ERROR_SERVICE_DOES_NOT_EXIST, ERROR_SERVICE_NOT_ACTIVE, GENERIC_READ, GENERIC_WRITE,
+        HANDLE, INVALID_HANDLE_VALUE, NO_ERROR, WAIT_OBJECT_0,
     },
     Security::{
         Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1},
@@ -654,6 +656,43 @@ fn wait_service_state(svc: SC_HANDLE, desired: u32, timeout: Duration) -> io::Re
     }
 }
 
+fn stop_service_and_wait(svc: SC_HANDLE, timeout: Duration) -> io::Result<StopOutcome> {
+    let mut status = SERVICE_STATUS::default();
+    if unsafe { ControlService(svc, SERVICE_CONTROL_STOP, &mut status) } != 0 {
+        wait_service_state(svc, SERVICE_STOPPED, timeout)?;
+        return Ok(StopOutcome::Stopped);
+    }
+    let err = io::Error::last_os_error();
+    match err.raw_os_error().map(|c| c as u32) {
+        Some(ERROR_SERVICE_NOT_ACTIVE) => Ok(StopOutcome::NotActive),
+        Some(ERROR_SERVICE_CANNOT_ACCEPT_CTRL) => {
+            let mut current = SERVICE_STATUS::default();
+            if unsafe { QueryServiceStatus(svc, &mut current) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if current.dwCurrentState == SERVICE_STOPPED {
+                return Ok(StopOutcome::NotActive);
+            }
+            if current.dwCurrentState == SERVICE_STOP_PENDING {
+                wait_service_state(svc, SERVICE_STOPPED, timeout)?;
+                return Ok(StopOutcome::Stopped);
+            }
+            Err(err)
+        }
+        _ => Err(err),
+    }
+}
+
+fn start_service_and_wait(svc: SC_HANDLE, timeout: Duration) -> io::Result<()> {
+    if unsafe { StartServiceW(svc, 0, ptr::null()) } == 0 {
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() != Some(ERROR_SERVICE_ALREADY_RUNNING as i32) {
+            return Err(err);
+        }
+    }
+    wait_service_state(svc, SERVICE_RUNNING, timeout)
+}
+
 /// Elevated installer entry point: deploy `FlashLinkVddHelper.exe` into the
 /// admin-protected `vdd_dir`, register/update the `FlashLinkVddHelper` service
 /// (`SERVICE_AUTO_START`), and start it so `Root\MttVDD` stays disabled outside
@@ -678,20 +717,21 @@ pub fn install_or_update(vdd_dir: &Path) -> io::Result<()> {
         Some(ServiceHandle(existing))
     };
 
-    if let Some(svc) = existing.as_ref() {
-        let mut status = SERVICE_STATUS::default();
-        if unsafe { ControlService(svc.0, SERVICE_CONTROL_STOP, &mut status) } != 0 {
-            let _ = wait_service_state(svc.0, SERVICE_STOPPED, Duration::from_secs(10));
-        } else {
-            let err = io::Error::last_os_error();
-            if err.raw_os_error() != Some(ERROR_SERVICE_NOT_ACTIVE as i32) {
-                return Err(err);
-            }
-        }
-    }
-
     let helper_exe = vdd_dir.join(HELPER_EXE_NAME);
-    bundle::write_pure_executable(&helper_exe)?;
+    let existing_raw = existing.as_ref().map(|svc| svc.0);
+    apply_service_update(
+        existing_raw.is_some(),
+        || {
+            let svc = existing_raw.expect("existing service handle");
+            stop_service_and_wait(svc, Duration::from_secs(10))
+        },
+        || bundle::write_pure_executable(&helper_exe),
+        || {
+            if let Some(svc) = existing_raw {
+                let _ = start_service_and_wait(svc, Duration::from_secs(10));
+            }
+        },
+    )?;
 
     let cmd = service_command_line(&helper_exe.to_string_lossy());
     let cmd_wide = wide(&cmd);
@@ -713,7 +753,9 @@ pub fn install_or_update(vdd_dir: &Path) -> io::Result<()> {
             )
         } == 0
         {
-            return Err(io::Error::last_os_error());
+            let err = io::Error::last_os_error();
+            let _ = start_service_and_wait(svc.0, Duration::from_secs(10));
+            return Err(err);
         }
         svc
     } else {
@@ -752,13 +794,7 @@ pub fn install_or_update(vdd_dir: &Path) -> io::Result<()> {
         )
     };
 
-    if unsafe { StartServiceW(svc.0, 0, ptr::null()) } == 0 {
-        let err = io::Error::last_os_error();
-        if err.raw_os_error() != Some(ERROR_SERVICE_ALREADY_RUNNING as i32) {
-            return Err(err);
-        }
-    }
-    wait_service_state(svc.0, SERVICE_RUNNING, Duration::from_secs(10))
+    start_service_and_wait(svc.0, Duration::from_secs(10))
 }
 
 fn open_client_pipe() -> io::Result<Option<OwnedHandle>> {

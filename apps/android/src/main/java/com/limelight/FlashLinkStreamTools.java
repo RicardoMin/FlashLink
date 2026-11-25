@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 package com.limelight;
 
 import android.app.AlertDialog;
@@ -192,6 +192,8 @@ final class FlashLinkStreamTools {
             panel.addView(quality, new LinearLayout.LayoutParams(MATCH, dp(60)));
         }
         LinearLayout row = row();
+        item(row, "串流声音", () -> { collapse(); FlashLinkAudio.show(game); });
+        row = row();
         item(row, "空格", () -> key(KeyEvent.KEYCODE_SPACE));
         item(row, "回车", () -> key(KeyEvent.KEYCODE_ENTER));
         item(row, "Esc", () -> key(KeyEvent.KEYCODE_ESCAPE));

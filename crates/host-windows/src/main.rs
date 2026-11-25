@@ -1,5 +1,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 #[cfg(any(windows, test))]
+mod audio;
+#[cfg(any(windows, test))]
 mod profile;
 #[cfg(windows)]
 mod windows_job;

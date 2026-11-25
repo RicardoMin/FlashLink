@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 package com.limelight;
 
 /** Finger gestures in the stationary input container. All input and timers run on the UI thread. */

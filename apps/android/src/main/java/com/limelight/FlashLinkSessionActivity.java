@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 package com.limelight;
 
 import android.app.Activity;
@@ -223,6 +223,8 @@ public final class FlashLinkSessionActivity extends Activity {
             Intent game = ServerHelper.createStartIntent(this, desktop, details, uid);
             game.setClass(this, FlashLinkGame.class);
             game.putExtra(FlashLinkGame.DEADLINE, recovery.deadline);
+            game.putExtra(FlashLinkAudio.MANAGED, FlashLinkPrivacyLease.supportsAudio(
+                    getApplicationContext(), host, port, trusted.getEncoded()));
             runOnUiThread(() -> { if (!stopped) { ready = game; openIfResumed(); } });
         } catch (Exception e) {
             if (stopped) return;

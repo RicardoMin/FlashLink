@@ -21,6 +21,7 @@ flowchart LR
     Host -->|启动、监督、本机管理 API| Sun
   end
   Native <-->|局域网发现与首次授权| Host
+  Player -->|已配对的会话心跳、播放策略与媒体音量| Host
   Native <-->|配对握手与 Desktop 查询| Sun
   Sun -->|加密视频与音频| Player
   Player -->|触控映射的鼠标等输入| Sun
@@ -47,6 +48,14 @@ Flutter 呈现手机设备列表及平板的列表／详情双栏。串流打开
 Windows 主进程提供系统托盘、逐设备撤销和报告导出。EXE 和便携 ZIP 中的主程序都嵌入了 MttVDD 驱动、签名目录和默认配置。主机启动时在后台检查设备，需要配置时由 Windows 请求管理员授权。主窗口和 Sunshine 继续以用户权限运行。防窥默认关闭，主机只在用户开启、已授权安卓会话仍在线且虚拟显示输出可用时切换显示。[内置显示组件](../crates/host-windows/src/privacy_driver.rs) · [主机会话](../crates/host-windows/src/service.rs)
 
 启用防窥后，独立 Rust 守护进程保存显示恢复信息，调用 Windows 显示配置 API，仅启用已识别的 MttVDD 虚拟输出并检查活动显示路径。安卓在原生播放器运行时通过双向 TLS 发送心跳；主机按 Sunshine 中已授权的客户端证书验证身份。心跳中断约 5 秒后进入 15 秒宽限期；期限结束后，守护进程停止串流并恢复实体屏。已授权的串流期间出现持续显示异常时，守护进程先尝试恢复原布局并继续串流，主机窗口会提示隐私已退出。主机确认恢复完成且本机已解锁后重新开启引擎与发现，沿用原配对记录。诊断文件记录这些状态的先后顺序。[显示拓扑](../crates/host-windows/src/privacy_display.rs) · [隐私守护进程](../crates/host-windows/src/privacy.rs) · [安卓心跳](../apps/android/src/main/java/com/limelight/FlashLinkPrivacyLease.java)
+
+## 串流声音与 Windows 主音量
+
+两个安卓入口读写同一组播放位置和断开偏好。播放器启动前会用已配对证书探测主机能力。支持声音控制时，Moonlight 请求 Sunshine 保留默认播放设备，Windows 继续采集该设备的 WASAPI 回环音频。安卓单独调整串流 `AudioTrack` 的增益，所以「仅电脑播放」也能读到用户真实的媒体音量。老主机沿用 Moonlight 的播放协商。[安卓设置](../apps/android/src/main/java/com/limelight/FlashLinkAudio.java) · [播放器](../apps/android/src/main/java/com/limelight/FlashLinkGame.java)
+
+串流建立后，安卓在原有双向 TLS 心跳中发送播放位置、断开策略、系统媒体音量百分比和静音状态。Windows 按客户端身份、会话编号和包序号接收更新，排除上一场会话迟到的退出消息。主动退出附带最终音量，掉线则保留最近的样本，直到重连宽限期结束。画质切换有独立的交接标记，避免重新协商时短暂恢复外放。[安卓会话通道](../apps/android/src/main/java/com/limelight/FlashLinkPrivacyLease.java) · [Windows 消息处理](../crates/host-windows/src/audio_wire.rs)
+
+Rust 负责会话策略和默认播放设备切换，Core Audio 负责读写 Windows 端点音量。串流切回本机播放时，主机只撤销 FlashLink 施加的临时静音。真正结束时，「跟随」写入音量及静音状态，「保持电脑静音」只设静音，保留 Windows 滑块位置。[声音策略](../crates/host-windows/src/audio.rs) · [Windows Core Audio](../crates/host-windows/src/audio_endpoint.cpp)
 
 ## 构建
 

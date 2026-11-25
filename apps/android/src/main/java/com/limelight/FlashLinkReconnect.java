@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 package com.limelight;
 
 /** Uses Android monotonic elapsed time for one interrupted foreground session. */
