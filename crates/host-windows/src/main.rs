@@ -29,6 +29,11 @@ mod privacy_display_plan;
 mod privacy_driver;
 #[cfg(any(windows, test))]
 mod privacy_time;
+#[cfg(any(windows, test))]
+#[cfg_attr(not(windows), allow(dead_code))]
+mod privacy_vdd_protocol;
+#[cfg(windows)]
+mod privacy_vdd_service;
 #[cfg(windows)]
 mod service;
 use std::ffi::OsString;
@@ -171,6 +176,12 @@ fn main() -> ExitCode {
     {
         let mut args = env::args_os().skip(1);
         let op = args.next();
+        if op.as_deref() == Some(std::ffi::OsStr::new("--vdd-service")) {
+            return match privacy_vdd_service::run_service() {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(_) => ExitCode::FAILURE,
+            };
+        }
         if op.as_deref() == Some(std::ffi::OsStr::new(privacy_driver::SETUP_ARGUMENT)) {
             if args.next().is_some() {
                 return ExitCode::FAILURE;

@@ -3,6 +3,7 @@
 use super::{
     privacy_display::{self, Target, Topology},
     privacy_time::{State, Timer},
+    privacy_vdd_protocol, privacy_vdd_service,
 };
 use std::{
     fs::{self, File, OpenOptions},
@@ -261,6 +262,19 @@ enum Control {
     End,
 }
 
+fn release_vdd_lease(dir: &Path, lease: &mut Option<privacy_vdd_service::VddLease>) {
+    let Some(active) = lease.take() else {
+        return;
+    };
+    let status = if active.release().is_ok() {
+        "ok"
+    } else {
+        "err"
+    };
+    privacy_display::log_vdd_lease(dir, "release", "dynamic", status);
+    let _ = privacy_display::wait_for_mttvdd_state(dir, false, Duration::from_secs(3));
+}
+
 pub fn run(dir: &Path, engine: Option<u32>) -> Result<(), String> {
     let guard_lock = OpenOptions::new()
         .read(true)
@@ -274,6 +288,8 @@ pub fn run(dir: &Path, engine: Option<u32>) -> Result<(), String> {
         .map_err(|_| "隐私恢复进程已在运行".to_string())?;
     let marker = dir.join(MARKER);
     if marker.try_exists().map_err(|e| e.to_string())? {
+        privacy_vdd_service::ensure_disabled_if_managed();
+        let _ = privacy_display::wait_for_mttvdd_state(dir, false, Duration::from_secs(2));
         let journal = Journal::read(dir)?;
         if journal.restored() {
             return journal.clear(dir);
@@ -297,7 +313,8 @@ pub fn run(dir: &Path, engine: Option<u32>) -> Result<(), String> {
         transaction: id.iter().map(|b| format!("{b:02x}")).collect(),
         targets: original.targets()?,
     };
-    let mut plan = Topology::virtual_only_plan(dir, &original)?;
+    // Capture desktop icons and window layout BEFORE enabling dynamic MttVDD,
+    // because enabling MttVDD can immediately load a saved virtual-only Set-A layout.
     let icons = crate::desktop_icons::DesktopIcons::capture()?;
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
@@ -335,17 +352,62 @@ pub fn run(dir: &Path, engine: Option<u32>) -> Result<(), String> {
         return Err("连接中断，请重新连接后开启隐私。".into());
     }
     journal.save(dir)?;
-    if let Err(e) = plan.activate(dir) {
-        // A failed mode set may already have changed the active paths.
-        if journal.restored() {
-            journal.clear(dir)?;
+    let mut vdd_lease = match privacy_vdd_service::VddLease::try_acquire() {
+        Ok(lease) => {
+            privacy_display::log_vdd_lease(
+                dir,
+                "acquire",
+                if lease.is_some() {
+                    "dynamic"
+                } else {
+                    "static_fallback"
+                },
+                "ok",
+            );
+            lease
+        }
+        Err(e) => {
+            privacy_display::log_vdd_lease(dir, "acquire", "dynamic", "err");
+            let _ = fs::remove_file(dir.join(MARKER));
             return Err(e);
         }
-        if !restore_while_connected(dir, &journal, &original, &icons)? {
-            stop_engine(&engine);
-            restore(dir, &journal, Some(&original))?;
+    };
+    let dynamic_vdd = vdd_lease.is_some();
+    let rollback =
+        |vdd_lease: &mut Option<privacy_vdd_service::VddLease>, e: String| -> Result<(), String> {
+            release_vdd_lease(dir, vdd_lease);
+            if journal.restored() {
+                journal.clear(dir)?;
+                return Err(e);
+            }
+            if !restore_while_connected(dir, &journal, &original, &icons)? {
+                stop_engine(&engine);
+                restore(dir, &journal, Some(&original))?;
+            }
+            Err(e)
+        };
+    if dynamic_vdd {
+        if let Err(e) = privacy_display::wait_for_mttvdd_state(dir, true, Duration::from_secs(8)) {
+            return rollback(&mut vdd_lease, e);
         }
-        return Err(e);
+        loop {
+            match rx.try_recv() {
+                Ok(Control::Beat(t)) => latest = t,
+                Ok(Control::End) => return rollback(&mut vdd_lease, "已取消切换".into()),
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    return rollback(&mut vdd_lease, "主机已退出".into());
+                }
+            }
+        }
+    }
+    let mut plan = match Topology::virtual_only_plan(dir, &original) {
+        Ok(plan) => plan,
+        Err(e) => return rollback(&mut vdd_lease, e),
+    };
+    if let Err(e) = plan.activate(dir) {
+        // A failed mode set may already have changed the active paths.
+        return rollback(&mut vdd_lease, e);
     }
     let started = Instant::now();
     let mut timer = Timer::new(started);
@@ -383,6 +445,7 @@ pub fn run(dir: &Path, engine: Option<u32>) -> Result<(), String> {
             }
             if matches!(received, Ok(Control::End)) {
                 if latest.elapsed() < super::privacy_time::STALE {
+                    release_vdd_lease(dir, &mut vdd_lease);
                     if restore_while_connected(dir, &journal, &original, &icons)? {
                         report("VISIBLE");
                         return Ok(());
@@ -407,7 +470,12 @@ pub fn run(dir: &Path, engine: Option<u32>) -> Result<(), String> {
                     record(dir, "guard_display_timeout");
                     break;
                 }
-                match plan.reapply_if_known_displays(dir, &original, &journal.targets) {
+                match plan.reapply_if_known_displays(
+                    dir,
+                    &original,
+                    &journal.targets,
+                    privacy_vdd_protocol::reapply_persistence(dynamic_vdd),
+                ) {
                     Ok(true) => {
                         repair.reapplied(Instant::now());
                         record(dir, "display_reapplied");
@@ -458,6 +526,7 @@ pub fn run(dir: &Path, engine: Option<u32>) -> Result<(), String> {
     } else {
         record(dir, "guard_display_changed");
     }
+    release_vdd_lease(dir, &mut vdd_lease);
     if display_failed && latest.elapsed() < super::privacy_time::STALE {
         report("DISPLAY_UNSTABLE");
         if restore_while_connected(dir, &journal, &original, &icons)? {
@@ -564,6 +633,8 @@ pub fn recover_if_abandoned(dir: &Path) -> Result<Option<Child>, String> {
     if !dir.join(MARKER).try_exists().map_err(|e| e.to_string())? {
         return Ok(None);
     }
+    privacy_vdd_service::ensure_disabled_if_managed();
+    let _ = privacy_display::wait_for_mttvdd_state(dir, false, Duration::from_secs(2));
     let journal = Journal::read(dir).map_err(|e| format!("无法读取隐私恢复记录：{e}"))?;
     if journal.restored() {
         journal.clear(dir)?;

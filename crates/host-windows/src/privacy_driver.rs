@@ -472,6 +472,16 @@ fn await_output(mut state: Device) -> io::Result<Readiness> {
     }
 }
 
+pub(crate) fn is_mttvdd_present() -> io::Result<bool> {
+    Ok(device()? != Device::Missing)
+}
+
+pub(crate) fn uses_flashlink_directory() -> bool {
+    component_dir()
+        .map(|dir| uses_directory(&dir))
+        .unwrap_or(false)
+}
+
 fn component_dir() -> io::Result<PathBuf> {
     Ok(program_files()?.join("FlashLink Virtual Display 25.7.23"))
 }
@@ -483,17 +493,34 @@ pub fn prepare(window: HWND) -> Result<Readiness, String> {
         }
         let dir = component_dir()?;
         let state = device()?;
+        let managed = uses_directory(&dir);
+        let helper_ready = managed && super::privacy_vdd_service::is_ready();
+        let helper_installed =
+            managed && dir.join(super::privacy_vdd_protocol::HELPER_EXE_NAME).is_file();
         let setup = match state {
             Device::Missing => true,
-            Device::Unconfigured => uses_directory(&dir),
-            Device::Running if uses_directory(&dir) => pending_settings(&dir)?.is_some(),
+            Device::Unconfigured => managed,
+            Device::Running if managed => !helper_ready || pending_settings(&dir)?.is_some(),
+            Device::Problem(CM_PROB_DISABLED) if managed => {
+                if helper_ready {
+                    pending_settings(&dir)?.is_some()
+                } else {
+                    helper_installed
+                }
+            }
             _ => false,
         };
         if !setup {
+            if helper_ready && matches!(state, Device::Running | Device::Problem(CM_PROB_DISABLED)) {
+                return Ok(Readiness::Ready);
+            }
             return await_output(state);
         }
         if launch(window)? == Readiness::RestartRequired {
             return Ok(Readiness::RestartRequired);
+        }
+        if uses_directory(&dir) && super::privacy_vdd_service::is_ready() {
+            return Ok(Readiness::Ready);
         }
         await_output(device()?)
     })();
@@ -524,11 +551,11 @@ fn provision() -> io::Result<Readiness> {
     match state {
         Device::Missing => {}
         Device::Unconfigured if uses_directory(&dir) => {}
-        Device::Running if uses_directory(&dir) => {
+        Device::Running | Device::Problem(CM_PROB_DISABLED) if uses_directory(&dir) => {
             if let Some(settings) = pending_settings(&dir)? {
                 write_component(&dir.join("vdd_settings.xml"), settings.as_bytes())?;
-                return mark_restart();
             }
+            super::privacy_vdd_service::install_or_update(&dir)?;
             return Ok(Readiness::Ready);
         }
         _ => return await_output(state),
@@ -555,6 +582,7 @@ fn provision() -> io::Result<Readiness> {
     } else {
         register(&inf)?
     };
+    super::privacy_vdd_service::install_or_update(&dir)?;
     if reboot {
         mark_restart()
     } else {

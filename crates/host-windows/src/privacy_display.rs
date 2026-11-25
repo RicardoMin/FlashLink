@@ -9,8 +9,8 @@ use std::{
     io::{self, Write},
     mem::size_of,
     path::Path,
-    ptr,
-    time::{SystemTime, UNIX_EPOCH},
+    ptr, thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use windows_sys::Win32::Graphics::Gdi::DISPLAYCONFIG_PATH_ACTIVE;
 use windows_sys::Win32::{
@@ -151,6 +151,23 @@ pub struct VirtualPlan {
 
 impl VirtualPlan {
     pub fn activate(&mut self, log_dir: &Path) -> Result<()> {
+        // When Root\MttVDD is dynamically enabled for this privacy session, Windows CCD
+        // may already load the previously saved virtual-only Set-A database topology.
+        // Skip a redundant SetDisplayConfig call when the active topology already matches
+        // the validated plan (target, resolution, rotation, and requested refresh rate).
+        if Topology::active().is_ok_and(|now| self.matches_exact(&now)) {
+            log_topology_call(
+                log_dir,
+                "apply",
+                "already_active",
+                0,
+                0,
+                &self.active.topology.paths,
+                &self.active.topology.modes,
+            );
+            self.sync_dpi(log_dir);
+            return Ok(());
+        }
         // Persist the virtual-only topology for the initial connected monitor set (Set A)
         // while privacy is active. When a disabled external HDMI/DP monitor enters standby,
         // drops HPD, and later re-asserts HPD, Windows reloads Set A's database entry instead
@@ -231,6 +248,30 @@ impl VirtualPlan {
             && now.primary_resolution() == self.active.topology.primary_resolution()
     }
 
+    fn matches_exact(&self, now: &Topology) -> bool {
+        if !self.matches(now) {
+            return false;
+        }
+        let wanted = &self.active.topology.paths[0].targetInfo;
+        let actual = &now.paths[0].targetInfo;
+        if actual.rotation != wanted.rotation {
+            return false;
+        }
+        if wanted.refreshRate.Numerator != 0 && wanted.refreshRate.Denominator != 0 {
+            if actual.refreshRate.Denominator == 0 {
+                return false;
+            }
+            let lhs = u64::from(actual.refreshRate.Numerator)
+                * u64::from(wanted.refreshRate.Denominator);
+            let rhs = u64::from(wanted.refreshRate.Numerator)
+                * u64::from(actual.refreshRate.Denominator);
+            if lhs != rhs {
+                return false;
+            }
+        }
+        true
+    }
+
     pub fn still_private(&self, log_dir: &Path) -> bool {
         let actual = Topology::active();
         if actual.as_ref().is_ok_and(|now| self.matches(now)) {
@@ -268,6 +309,7 @@ impl VirtualPlan {
         dir: &Path,
         original: &Topology,
         known: &[Target],
+        persistence: ApplyPersistence,
     ) -> Result<bool> {
         let mut now = Topology::active()?;
         // Windows may have finished the transition since the watchdog sampled
@@ -285,15 +327,22 @@ impl VirtualPlan {
                 return Err("显示器身份已变化".into());
             }
         }
-        // Reapply transiently (without SDC_SAVE_TO_DATABASE): a sleeping external monitor
-        // drops HPD into a reduced monitor set (Set B), and we must never overwrite Set B's
-        // database entry so unplugging the external monitor later still uses the laptop panel.
-        if self.active.apply(dir, ApplyPersistence::Transient).is_err() {
-            // Hotplug can invalidate source and target IDs. Rebuild from current
-            // available paths, always using the pre-privacy desktop as the template.
-            let mut next = Topology::virtual_only_plan(dir, original)?;
-            next.activate_with_persistence(dir, ApplyPersistence::Transient)?;
-            *self = next;
+        // When MttVDD is dynamically attached only for this privacy session, `persistence`
+        // is `SaveToDatabase`: reduced privacy sets containing MttVDD (e.g. Set B_priv during
+        // external monitor standby HPD drops) never occur outside privacy mode, so persisting
+        // virtual-only eliminates repeated Set-B bounces without risking an unplug black screen.
+        // For legacy always-on MttVDD installs, `persistence` stays `Transient`.
+        if let Err(code) = self.active.apply(dir, persistence) {
+            let fallback_ok = persistence == ApplyPersistence::SaveToDatabase
+                && code != 5
+                && self.active.apply(dir, ApplyPersistence::Transient).is_ok();
+            if !fallback_ok {
+                // Hotplug can invalidate source and target IDs. Rebuild from current
+                // available paths, always using the pre-privacy desktop as the template.
+                let mut next = Topology::virtual_only_plan(dir, original)?;
+                next.activate_with_persistence(dir, persistence)?;
+                *self = next;
+            }
         }
         self.sync_dpi(dir);
         Ok(true)
@@ -940,6 +989,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn matches_exact_checks_rotation_and_requested_refresh_rate() {
+        let make = |w, h, rot, num, den| {
+            let mut path = DISPLAYCONFIG_PATH_INFO::default();
+            path.targetInfo.adapterId.LowPart = 0x5f41_39e9;
+            path.targetInfo.id = 256;
+            path.targetInfo.rotation = rot;
+            path.targetInfo.refreshRate = DISPLAYCONFIG_RATIONAL {
+                Numerator: num,
+                Denominator: den,
+            };
+            let mut mode = DISPLAYCONFIG_MODE_INFO::default();
+            mode.infoType = DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE;
+            mode.Anonymous.sourceMode.width = w;
+            mode.Anonymous.sourceMode.height = h;
+            Topology {
+                paths: vec![path],
+                modes: vec![mode],
+            }
+        };
+        let plan = VirtualPlan {
+            active: PlanAttempt {
+                topology: make(3840, 2160, 1, 144, 1),
+                strategy: PlanStrategy::SuppliedSourceOnly,
+                config_flags: SDC_USE_SUPPLIED_DISPLAY_CONFIG,
+            },
+            fallbacks: Vec::new(),
+            primary_dpi_percent: None,
+        };
+        assert!(plan.matches_exact(&make(3840, 2160, 1, 144, 1)));
+        assert!(plan.matches_exact(&make(3840, 2160, 1, 288, 2)));
+        assert!(!plan.matches_exact(&make(3840, 2160, 1, 60, 1)));
+        assert!(!plan.matches_exact(&make(3840, 2160, 2, 144, 1)));
+        assert!(!plan.matches_exact(&make(1920, 1080, 1, 144, 1)));
+    }
+
+    #[test]
     fn every_virtual_candidate_preserves_the_original_primary_desktop() {
         // Secondary paths precede the primary, as can happen on docked laptops.
         for (width, height, rotation, multi) in [
@@ -1023,7 +1108,12 @@ mod tests {
                     if !repair.can_repair(std::time::Instant::now()) {
                         return Err("virtual desktop did not recover".into());
                     }
-                    if plan.reapply_if_known_displays(&dir, &original, &targets)? {
+                    if plan.reapply_if_known_displays(
+                        &dir,
+                        &original,
+                        &targets,
+                        ApplyPersistence::Transient,
+                    )? {
                         repair.reapplied(std::time::Instant::now());
                     }
                     align_at =
@@ -1293,6 +1383,55 @@ pub fn restore_database(log_dir: Option<&Path>) -> Result<()> {
         Ok(())
     } else {
         Err(io::Error::from_raw_os_error(e).to_string())
+    }
+}
+
+pub fn log_vdd_lease(dir: &Path, action: &str, mode: &str, status: &str) {
+    append_display_log(
+        dir,
+        &format!(
+            "{} phase=vdd_lease action={action} mode={mode} status={status}",
+            now_secs()
+        ),
+    );
+}
+
+pub fn wait_for_mttvdd_state(
+    log_dir: &Path,
+    expected_available: bool,
+    timeout: Duration,
+) -> Result<()> {
+    let start = Instant::now();
+    loop {
+        if Topology::privacy_target_available().unwrap_or(false) == expected_available {
+            append_display_log(
+                log_dir,
+                &format!(
+                    "{} phase=vdd_wait expected={} status=ok elapsed_ms={}",
+                    now_secs(),
+                    if expected_available { 1 } else { 0 },
+                    start.elapsed().as_millis()
+                ),
+            );
+            return Ok(());
+        }
+        if start.elapsed() >= timeout {
+            append_display_log(
+                log_dir,
+                &format!(
+                    "{} phase=vdd_wait expected={} status=timeout elapsed_ms={}",
+                    now_secs(),
+                    if expected_available { 1 } else { 0 },
+                    start.elapsed().as_millis()
+                ),
+            );
+            return Err(if expected_available {
+                "防窥显示启用后未能及时就绪，请重试。".into()
+            } else {
+                "等待防窥显示停用超时".into()
+            });
+        }
+        thread::sleep(Duration::from_millis(100));
     }
 }
 

@@ -107,7 +107,7 @@ impl PrivacySetup {
             ),
             Self::Checked(Ok(Readiness::RestartRequired)) => (
                 Busy,
-                "防窥模式需重启 Windows 后生效。当前仍可使用普通串流。".into(),
+                "首次安装防窥组件需重启一次 Windows 后生效，后续日常开关无需重启。当前仍可使用普通串流。".into(),
             ),
             Self::Checked(Err(e)) => (Enable, format!("点击“开启防窥模式”可重试。\r\n{e}")),
         };
@@ -647,6 +647,9 @@ mod tests {
             };
             assert_eq!(control == PrivacyControl::Enable, can_retry);
             assert!(text.contains(if can_retry { "重试" } else { "重启" }));
+            if !can_retry {
+                assert!(text.contains("无需重启"));
+            }
         }
         let (done, task) = mpsc::channel();
         let mut retry = PrivacySetup::Checking(task);
