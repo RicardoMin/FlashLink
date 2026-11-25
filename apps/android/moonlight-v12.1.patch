@@ -468,7 +468,7 @@ index 15de902..5c82cb0 100644
  zipStoreBase=GRADLE_USER_HOME
  zipStorePath=wrapper/dists
 diff --git a/app/src/main/java/com/limelight/Game.java b/app/src/main/java/com/limelight/Game.java
-index 42bc0c7..e77fdf2 100644
+index 42bc0c7..d34c0d1 100644
 --- a/app/src/main/java/com/limelight/Game.java
 +++ b/app/src/main/java/com/limelight/Game.java
 @@ -96,7 +96,8 @@ public class Game extends Activity implements SurfaceHolder.Callback,
@@ -515,6 +515,15 @@ index 42bc0c7..e77fdf2 100644
                  else {
                      chosenFrameRate = roundedRefreshRate - 1;
                      LimeLog.info("Adjusting FPS target for screen to " + chosenFrameRate);
+@@ -471,7 +485,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
+                 .setApp(app)
+                 .setBitrate(prefConfig.bitrate)
+                 .setEnableSops(prefConfig.enableSops)
+-                .enableLocalAudioPlayback(prefConfig.playHostAudio)
++                .enableLocalAudioPlayback(playAudioOnHost())
+                 .setMaxPacketSize(1392)
+                 .setRemoteConfiguration(StreamConfiguration.STREAM_CFG_AUTO) // NvConnection will perform LAN and VPN detection
+                 .setSupportedVideoFormats(supportedVideoFormats)
 @@ -494,17 +508,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
          InputManager inputManager = (InputManager) getSystemService(Context.INPUT_SERVICE);
          inputManager.registerInputDeviceListener(keyboardTranslator, null);
@@ -783,7 +792,22 @@ index 42bc0c7..e77fdf2 100644
                  connected = true;
                  connecting = false;
                  updatePipAutoEnter();
-@@ -2527,6 +2625,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
+@@ -2519,6 +2617,14 @@ public class Game extends Activity implements SurfaceHolder.Callback,
+         controllerHandler.handleSetControllerLED(controllerNumber, r, g, b);
+     }
+
++    protected boolean playAudioOnHost() {
++        return prefConfig.playHostAudio;
++    }
++
++    protected AndroidAudioRenderer createAudioRenderer() {
++        return new AndroidAudioRenderer(this, prefConfig.enableAudioFx);
++    }
++
+     @Override
+     public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
+         if (!surfaceCreated) {
+@@ -2527,12 +2633,13 @@ public class Game extends Activity implements SurfaceHolder.Callback,
 
          if (!attemptedConnection) {
              attemptedConnection = true;
@@ -791,6 +815,13 @@ index 42bc0c7..e77fdf2 100644
 
              // Update GameManager state to indicate we're "loading" while connecting
              UiHelper.notifyStreamConnecting(Game.this);
+
+             decoderRenderer.setRenderTarget(holder);
+-            conn.start(new AndroidAudioRenderer(Game.this, prefConfig.enableAudioFx),
++            conn.start(createAudioRenderer(),
+                     decoderRenderer, Game.this);
+         }
+     }
 diff --git a/app/src/main/java/com/limelight/binding/input/touch/RelativeTouchContext.java b/app/src/main/java/com/limelight/binding/input/touch/RelativeTouchContext.java
 index 7ed8f09..22b65c8 100644
 --- a/app/src/main/java/com/limelight/binding/input/touch/RelativeTouchContext.java
@@ -915,10 +946,20 @@ index e0ba76e..492c7c8 100644
          SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(context);
          return getDefaultBitrate(
 diff --git a/app/src/main/res/xml/preferences.xml b/app/src/main/res/xml/preferences.xml
-index d68c8c5..b635a90 100644
+index d68c8c5..668441a 100644
 --- a/app/src/main/res/xml/preferences.xml
 +++ b/app/src/main/res/xml/preferences.xml
-@@ -130,10 +130,10 @@
+@@ -41,7 +41,8 @@
+             android:title="@string/title_checkbox_stretch_video"
+             android:defaultValue="false" />
+     </PreferenceCategory>
+-    <PreferenceCategory android:title="@string/category_audio_settings">
++    <PreferenceCategory android:title="@string/category_audio_settings"
++        android:key="category_audio_settings">
+         <ListPreference
+             android:key="list_audio_config"
+             android:title="@string/title_audio_config_list"
+@@ -130,10 +131,10 @@
      <PreferenceCategory android:title="@string/category_input_settings"
          android:key="category_input_settings">
          <CheckBoxPreference
@@ -931,6 +972,18 @@ index d68c8c5..b635a90 100644
          <CheckBoxPreference
              android:key="checkbox_mouse_nav_buttons"
              android:title="@string/title_checkbox_mouse_nav_buttons"
+@@ -191,11 +192,6 @@
+             android:title="@string/title_checkbox_enable_sops"
+             android:summary="@string/summary_checkbox_enable_sops"
+             android:defaultValue="true" />
+-        <CheckBoxPreference
+-            android:key="checkbox_host_audio"
+-            android:title="@string/title_checkbox_host_audio"
+-            android:summary="@string/summary_checkbox_host_audio"
+-            android:defaultValue="false" />
+     </PreferenceCategory>
+     <PreferenceCategory android:title="@string/category_ui_settings"
+         android:key="category_ui_settings">
 diff --git a/app/src/main/java/com/limelight/binding/video/PerfOverlayListener.java b/app/src/main/java/com/limelight/binding/video/PerfOverlayListener.java
 index 281f95a..980b951 100644
 --- a/app/src/main/java/com/limelight/binding/video/PerfOverlayListener.java
@@ -1043,3 +1096,71 @@ index f892e9f..a5631b1 100644
                          return;
                      }
                  }
+diff --git a/app/src/main/java/com/limelight/binding/audio/AndroidAudioRenderer.java b/app/src/main/java/com/limelight/binding/audio/AndroidAudioRenderer.java
+index 7c7776b..ce8575e 100644
+--- a/app/src/main/java/com/limelight/binding/audio/AndroidAudioRenderer.java
++++ b/app/src/main/java/com/limelight/binding/audio/AndroidAudioRenderer.java
+@@ -19,12 +19,20 @@ public class AndroidAudioRenderer implements AudioRenderer {
+     private final boolean enableAudioFx;
+
+     private AudioTrack track;
++    private boolean muted;
+
+     public AndroidAudioRenderer(Context context, boolean enableAudioFx) {
+         this.context = context;
+         this.enableAudioFx = enableAudioFx;
+     }
+
++    public synchronized void setMuted(boolean muted) {
++        this.muted = muted;
++        if (track != null) {
++            track.setVolume(muted ? 0f : 1f);
++        }
++    }
++
+     private AudioTrack createAudioTrack(int channelConfig, int sampleRate, int bufferSize, boolean lowLatency) {
+         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
+             return new AudioTrack(AudioManager.STREAM_MUSIC,
+@@ -75,7 +83,7 @@ public class AndroidAudioRenderer implements AudioRenderer {
+     }
+
+     @Override
+-    public int setup(MoonBridge.AudioConfiguration audioConfiguration, int sampleRate, int samplesPerFrame) {
++    public synchronized int setup(MoonBridge.AudioConfiguration audioConfiguration, int sampleRate, int samplesPerFrame) {
+         int channelConfig;
+         int bytesPerFrame;
+
+@@ -180,6 +188,7 @@ public class AndroidAudioRenderer implements AudioRenderer {
+
+             try {
+                 track = createAudioTrack(channelConfig, sampleRate, bufferSize, lowLatency);
++                if (muted) track.setVolume(0f);
+                 track.play();
+
+                 // Successfully created working AudioTrack. We're done here.
+@@ -243,11 +252,12 @@ public class AndroidAudioRenderer implements AudioRenderer {
+     }
+
+     @Override
+-    public void cleanup() {
++    public synchronized void cleanup() {
+         // Immediately drop all pending data
+         track.pause();
+         track.flush();
+
+         track.release();
++        track = null;
+     }
+ }
+diff --git a/app/src/main/java/com/limelight/preferences/StreamSettings.java b/app/src/main/java/com/limelight/preferences/StreamSettings.java
+index f5bd203..e0c923f 100644
+--- a/app/src/main/java/com/limelight/preferences/StreamSettings.java
++++ b/app/src/main/java/com/limelight/preferences/StreamSettings.java
+@@ -275,6 +275,7 @@ public class StreamSettings extends Activity {
+             super.onCreate(savedInstanceState);
+
+             addPreferencesFromResource(R.xml.preferences);
++            com.limelight.FlashLinkAudio.addPreferences((PreferenceCategory) findPreference("category_audio_settings"));
+             PreferenceScreen screen = getPreferenceScreen();
+
+             // hide on-screen controls category on non touch screen devices

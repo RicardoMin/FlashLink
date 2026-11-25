@@ -276,14 +276,17 @@ fn privacy_control(window: HWND, button: HWND, control: PrivacyControl) {
     enable(button, enabled);
     desktop_menu::set_privacy(window, label, enabled);
 }
-fn start(options: Options, events: mpsc::Sender<Event>) -> mpsc::Sender<Action> {
+fn start(
+    options: Options,
+    events: mpsc::Sender<Event>,
+) -> (mpsc::Sender<Action>, thread::JoinHandle<()>) {
     let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
+    let worker = thread::spawn(move || {
         if let Err(error) = service::serve(&options, &events, &rx) {
             let _ = events.send(Event::Failed(error));
         }
     });
-    tx
+    (tx, worker)
 }
 
 pub fn window(options: Options) -> Result<(), String> {
@@ -481,7 +484,7 @@ pub fn window(options: Options) -> Result<(), String> {
     SHELL_RESTARTED.with(|id| id.set(tray.shell_restarted));
     visible(main, true);
     let (event_tx, event_rx) = mpsc::channel();
-    let mut commands = start(options.clone(), event_tx.clone());
+    let (mut commands, mut worker) = start(options.clone(), event_tx.clone());
     let mut pending = None;
     let mut connection = None;
     let mut firewall_active = false;
@@ -680,7 +683,7 @@ pub fn window(options: Options) -> Result<(), String> {
                     connection = None;
                     set_text(phase, "正在启动串流引擎…");
                     set_text(details, "正在检查端口与本机身份。");
-                    commands = start(options.clone(), event_tx.clone());
+                    (commands, worker) = start(options.clone(), event_tx.clone());
                 }
                 Input::Button(FIREWALL) if !firewall_active => {
                     if let Some((engine, base)) = connection.clone() {
@@ -731,6 +734,7 @@ pub fn window(options: Options) -> Result<(), String> {
         DestroyWindow(consent);
         DestroyWindow(main);
     }
+    let _ = worker.join();
     Ok(())
 }
 

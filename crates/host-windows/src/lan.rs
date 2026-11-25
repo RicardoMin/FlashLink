@@ -12,6 +12,10 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+#[path = "audio_wire.rs"]
+pub mod audio_wire;
+use audio_wire::{AudioSession, Report, Streams};
+
 pub const DISCOVERY_PORT: u16 = 47980;
 const LIFETIME: Duration = Duration::from_secs(90);
 const POLL: Duration = Duration::from_millis(100);
@@ -164,14 +168,12 @@ impl Write for DeadlineSocket {
     }
 }
 
-type LastBeat = Arc<Mutex<Option<([u8; 32], Instant)>>>;
-
 fn receive(
     stream: TcpStream,
     tls: Arc<ServerConfig>,
     inbox: &Mutex<Inbox>,
     host_code: &str,
-    last_beat: &LastBeat,
+    streams: &Mutex<Streams>,
 ) -> io::Result<()> {
     let peer = stream.peer_addr()?.ip();
     let socket = DeadlineSocket::new(stream, Duration::from_secs(5))?;
@@ -179,17 +181,26 @@ fn receive(
     let mut encrypted = StreamOwned::new(conn, socket);
     let mut line = Vec::new();
     BufReader::new((&mut encrypted).take(512)).read_until(b'\n', &mut line)?;
-    let accepted = if line == b"FLASHLINK_STREAM/1\n" {
-        encrypted
-            .conn
-            .peer_certificates()
-            .and_then(|c| c.first())
-            .is_some_and(|cert| {
-                last_beat.lock().is_ok_and(|mut beat| {
-                    *beat = Some((Sha256::digest(cert.as_ref()).into(), Instant::now()));
-                    true
-                })
+    let owner = encrypted
+        .conn
+        .peer_certificates()
+        .and_then(|c| c.first())
+        .map(|cert| <[u8; 32]>::from(Sha256::digest(cert.as_ref())));
+    let accepted = if line == b"FLASHLINK_AUDIO_CAPS/1\n" {
+        owner.is_some()
+    } else if line == b"FLASHLINK_STREAM/1\n" {
+        owner.is_some_and(|id| {
+            streams.lock().is_ok_and(|mut s| {
+                s.legacy(id, Instant::now());
+                true
             })
+        })
+    } else if let Some(report) = Report::parse(&line) {
+        owner.is_some_and(|id| {
+            streams
+                .lock()
+                .is_ok_and(|mut s| s.update(id, report, Instant::now()))
+        })
     } else {
         parse_pair(&line, peer, host_code)
             .is_some_and(|p| inbox.lock().is_ok_and(|mut q| q.store(p)))
@@ -199,7 +210,7 @@ fn receive(
 }
 
 pub struct Nearby {
-    last_beat: LastBeat,
+    streams: Arc<Mutex<Streams>>,
     inbox: Arc<Mutex<Inbox>>,
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
@@ -234,8 +245,8 @@ impl Nearby {
         config.send_tls13_tickets = 0;
         config.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
         let tls = Arc::new(config);
-        let last_beat: LastBeat = Arc::default();
-        let beats = last_beat.clone();
+        let streams = Arc::new(Mutex::new(Streams::default()));
+        let active_streams = streams.clone();
         let udp = UdpSocket::bind((bind_address, DISCOVERY_PORT))
             .map_err(|e| io::Error::new(e.kind(), format!("设备发现 UDP {DISCOVERY_PORT}: {e}")))?;
         udp.set_read_timeout(Some(POLL))?;
@@ -281,11 +292,11 @@ impl Nearby {
                         active.fetch_add(1, Ordering::AcqRel);
                         let (tls, queue, count) = (tls.clone(), queue.clone(), active.clone());
                         let host_code = host_code.clone();
-                        let beat = beats.clone();
+                        let reports = active_streams.clone();
                         if thread::Builder::new()
                             .name("FlashLink pairing".into())
                             .spawn(move || {
-                                let _ = receive(stream, tls, &queue, &host_code, &beat);
+                                let _ = receive(stream, tls, &queue, &host_code, &reports);
                                 count.fetch_sub(1, Ordering::AcqRel);
                             })
                             .is_err()
@@ -296,7 +307,7 @@ impl Nearby {
                 }
             })?;
         Ok(Self {
-            last_beat,
+            streams,
             inbox,
             stop,
             worker: Some(worker),
@@ -304,15 +315,19 @@ impl Nearby {
     }
 
     pub fn heartbeat(&self, owner: &[u8; 32]) -> Option<Instant> {
-        self.last_beat
+        self.streams
             .lock()
             .ok()?
-            .as_ref()
+            .heartbeat
             .filter(|(id, _)| id == owner)
-            .map(|(_, ts)| *ts)
+            .map(|(_, ts)| ts)
     }
 
-    pub fn take_request(&mut self, source_ip: IpAddr, pairing_name: &str) -> Option<Approval> {
+    pub fn audio_session(&self) -> Option<AudioSession> {
+        self.streams.lock().ok()?.audio
+    }
+
+    pub fn take_request(&self, source_ip: IpAddr, pairing_name: &str) -> Option<Approval> {
         self.inbox
             .lock()
             .ok()?
