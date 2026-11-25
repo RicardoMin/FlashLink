@@ -2,11 +2,12 @@
 [CmdletBinding()]
 param(
     [string]$StateDir = (Join-Path $env:LOCALAPPDATA 'FlashLink\DemoHost'),
-    [string]$OutputDir = (Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'FlashLink/testdata'),
+    [string]$OutputDir = (Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'FlashLink\testdata'),
     [string]$HostExecutable
 )
 $ErrorActionPreference = 'Stop'
-[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+$utf8 = New-Object System.Text.UTF8Encoding($false)
+try { [Console]::OutputEncoding = $utf8 } catch {}
 
 $now = [DateTime]::UtcNow
 $video = @()
@@ -55,7 +56,7 @@ $privacyLog = Join-Path $StateDir 'privacy-events.log'
 if (Test-Path -LiteralPath $privacyLog -PathType Leaf) {
     $events = @(foreach ($line in Get-Content -LiteralPath $privacyLog -Tail 256) {
         if ($line -cmatch '^(\d{1,12})\s+(private|lost|resumed|locking|locked|restored|restore_pending|display_reapplied|guard_(?:pipe_closed|display_changed|display_timeout|display_without_lease|desktop_unavailable|engine_exited|lease_expired|user_end|owner_unavailable|management_unavailable))$') {
-            [ordered]@{ unix_seconds = [long]$Matches[1]; event = $Matches[2] }
+            [ordered]@{ unix_seconds = [long]$Matches[1]; event = [string]$Matches[2] }
         }
     })
 }
@@ -64,7 +65,7 @@ $privacyDisplayLog = Join-Path $StateDir 'privacy-display.log'
 if (Test-Path -LiteralPath $privacyDisplayLog -PathType Leaf) {
     $displayLog = @(foreach ($line in Get-Content -LiteralPath $privacyDisplayLog -Tail 256) {
         if ($line -cmatch '^\d{1,12}\s+phase=[a-z_]+(?:\s+[a-z_]+=[-0-9a-zA-Z_,/:]+)+$') {
-            $line
+            [string]$Matches[0]
         }
     })
 }
@@ -83,6 +84,13 @@ $null = [IO.Directory]::CreateDirectory($OutputDir)
 $id = [Guid]::NewGuid().ToString('N').Substring(0, 8)
 $filename = 'windows-' + $now.ToString('yyyyMMddTHHmmssZ') + '-' + $id + '.json'
 $path = Join-Path $OutputDir $filename
-[IO.File]::WriteAllText($path + '.tmp', ($report | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding($false)))
+[IO.File]::WriteAllText($path + '.tmp', ($report | ConvertTo-Json -Depth 6), $utf8)
 [IO.File]::Move($path + '.tmp', $path)
-[Console]::WriteLine($path)
+if ([Console]::IsOutputRedirected) {
+    $bytes = $utf8.GetBytes($path + "`n")
+    $stdout = [Console]::OpenStandardOutput()
+    $stdout.Write($bytes, 0, $bytes.Length)
+    $stdout.Flush()
+} else {
+    [Console]::WriteLine($path)
+}
