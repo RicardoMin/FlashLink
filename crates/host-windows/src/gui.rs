@@ -719,23 +719,35 @@ pub fn window(options: Options) -> Result<(), String> {
 }
 
 fn export_report(directory: &Path) -> Result<String, String> {
+    export_report_to(directory, None)
+}
+
+fn export_report_to(directory: &Path, output_dir: Option<&Path>) -> Result<String, String> {
     let script = include_str!("../assets/Export-FlashLinkReport.ps1");
+    let output_arg = if output_dir.is_some() {
+        " -OutputDir $env:FLASHLINK_REPORT_OUT"
+    } else {
+        ""
+    };
     let command = format!(
-        "& {{ {script}\n }} -StateDir $env:FLASHLINK_REPORT_STATE -HostExecutable $env:FLASHLINK_REPORT_EXE"
+        "& {{ {script}\n }} -StateDir $env:FLASHLINK_REPORT_STATE{output_arg} -HostExecutable $env:FLASHLINK_REPORT_EXE"
     );
     let root = std::env::var_os("SystemRoot").ok_or("找不到 Windows 系统目录")?;
-    let result = std::process::Command::new(
+    let mut process = std::process::Command::new(
         PathBuf::from(root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe"),
-    )
-    .args(["-NoProfile", "-NonInteractive", "-Command", &command])
-    .env("FLASHLINK_REPORT_STATE", directory)
-    .env(
-        "FLASHLINK_REPORT_EXE",
-        std::env::current_exe().map_err(|e| e.to_string())?,
-    )
-    .creation_flags(0x08000000)
-    .output()
-    .map_err(|e| e.to_string())?;
+    );
+    process
+        .args(["-NoProfile", "-NonInteractive", "-Command", &command])
+        .env("FLASHLINK_REPORT_STATE", directory)
+        .env(
+            "FLASHLINK_REPORT_EXE",
+            std::env::current_exe().map_err(|e| e.to_string())?,
+        )
+        .creation_flags(0x08000000);
+    if let Some(out) = output_dir {
+        process.env("FLASHLINK_REPORT_OUT", out);
+    }
+    let result = process.output().map_err(|e| e.to_string())?;
     if !result.status.success() {
         return Err("请检查文稿文件夹写入权限及 PowerShell 的执行状态。".into());
     }
@@ -775,4 +787,78 @@ fn firewall_setup(engine: &Path, base: u16) -> Result<String, String> {
         _ => "无法添加规则。请检查 Windows Defender 防火墙或网络管理员策略。",
     }
     .into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn exported_report_serializes_display_log_as_plain_strings_without_ps_metadata() {
+        let base = std::env::temp_dir().join(format!("flashlink-report-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let state_dir = base.join("state");
+        let out_dir = base.join("out");
+        fs::create_dir_all(&state_dir).unwrap();
+        fs::create_dir_all(&out_dir).unwrap();
+
+        let line1 = "1795604162 phase=apply strategy=supplied_source_only flags=0x000002a0 status=0 paths=1 modes=1 adapter=0:0x5f4139e9 src=0 tgt=256";
+        let line2 = "1795604162 phase=dpi_sync status=unchanged cur_pct=175 target_pct=175";
+        let display_contents = format!("{line1}\nnot a matching line\n{line2}\n");
+        let events_contents = "1795604162 private\n1795604176 display_reapplied\n";
+        let host_log = "[time]: Info: CLIENT CONNECTED\n[time]: Warning: display topology\n";
+        fs::write(state_dir.join("privacy-display.log"), display_contents).unwrap();
+        fs::write(state_dir.join("privacy-events.log"), events_contents).unwrap();
+        fs::write(state_dir.join("flashlink-sunshine.log"), host_log).unwrap();
+
+        let exported_path = export_report_to(&state_dir, Some(&out_dir)).unwrap();
+        let raw = fs::read_to_string(&exported_path).unwrap();
+        assert!(raw.len() < 64 * 1024, "report too large: {}", raw.len());
+        for forbidden in [
+            "\"PSProvider\"",
+            "\"PSDrive\"",
+            "\"PSPath\"",
+            "\"PSParentPath\"",
+            "\"PSChildName\"",
+            "\"ReadCount\"",
+        ] {
+            assert!(!raw.contains(forbidden), "leaked {forbidden}");
+        }
+
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let display_log = parsed["privacy_display_log"]
+            .as_array()
+            .expect("privacy_display_log should be a JSON array");
+        let strings: Vec<&str> = display_log
+            .iter()
+            .map(|entry| entry.as_str().expect("display log must be plain strings"))
+            .collect();
+        assert_eq!(strings, vec![line1, line2]);
+
+        let events = parsed["privacy_events"]
+            .as_array()
+            .expect("privacy_events should be a JSON array");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["event"].as_str(), Some("private"));
+        assert_eq!(events[1]["event"].as_str(), Some("display_reapplied"));
+
+        // Verify a single matching line also stays a JSON array of plain strings in PowerShell 5.1.
+        fs::write(state_dir.join("privacy-display.log"), format!("{line1}\n")).unwrap();
+        fs::write(state_dir.join("privacy-events.log"), "1795604162 private\n").unwrap();
+        let single_path = export_report_to(&state_dir, Some(&out_dir)).unwrap();
+        let single_raw = fs::read_to_string(&single_path).unwrap();
+        assert!(!single_raw.contains("\"PSProvider\""));
+        let single_parsed: serde_json::Value = serde_json::from_str(&single_raw).unwrap();
+        let single_display: Vec<&str> = single_parsed["privacy_display_log"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(single_display, vec![line1]);
+        assert_eq!(single_parsed["privacy_events"].as_array().unwrap().len(), 1);
+
+        let _ = fs::remove_dir_all(&base);
+    }
 }
