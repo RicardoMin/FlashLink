@@ -985,7 +985,10 @@ mod tests {
 
     #[test]
     fn parsed_pipe_dacl_denies_create_pipe_instance_to_interactive_users() {
-        assert_eq!(CLIENT_OPEN_ACCESS, crate::privacy_vdd_protocol::CLIENT_PIPE_ACCESS);
+        assert_eq!(
+            CLIENT_OPEN_ACCESS,
+            crate::privacy_vdd_protocol::CLIENT_PIPE_ACCESS
+        );
         assert_eq!(CLIENT_OPEN_ACCESS & FILE_CREATE_PIPE_INSTANCE, 0);
 
         let sddl = wide(PIPE_SDDL);
@@ -1098,7 +1101,11 @@ mod tests {
         });
 
         let client = open_client_pipe_named(&pipe_name).unwrap().unwrap();
-        write_sync(client.as_raw_handle(), format_request(Request::Status).as_bytes()).unwrap();
+        write_sync(
+            client.as_raw_handle(),
+            format_request(Request::Status).as_bytes(),
+        )
+        .unwrap();
         let resp = read_line_sync(client.as_raw_handle()).unwrap();
         assert_eq!(parse_response(&resp), Some(Response::Ready));
         handle.join().unwrap();
