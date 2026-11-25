@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+const OWNER_GRACE: Duration = Duration::from_secs(5);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AudioOutput {
     Controller,
@@ -111,6 +113,15 @@ pub(super) struct Streams {
 
 impl Streams {
     pub(super) fn legacy(&mut self, owner: [u8; 32], now: Instant) {
+        // A v1 beat has no session ID. Even the same certificate may have a delayed
+        // beat from an earlier stream. Keep a recent final sample long enough for
+        // the mixer to apply it on its next poll.
+        if self
+            .audio
+            .is_some_and(|s| now.duration_since(s.last_seen) < OWNER_GRACE)
+        {
+            return;
+        }
         self.heartbeat = Some((owner, now));
         self.audio = None;
     }
@@ -140,14 +151,14 @@ impl Streams {
                 s.owner != owner
                     && !s.ended
                     && (report.phase != Phase::Live
-                        || now.duration_since(s.last_seen) < Duration::from_secs(5))
+                        || now.duration_since(s.last_seen) < OWNER_GRACE)
             }) {
                 return false;
             }
             if self.audio.is_none()
-                && self.heartbeat.is_some_and(|(id, seen)| {
-                    id != owner && now.duration_since(seen) < Duration::from_secs(5)
-                })
+                && self
+                    .heartbeat
+                    .is_some_and(|(id, seen)| id != owner && now.duration_since(seen) < OWNER_GRACE)
             {
                 return false;
             }
@@ -212,8 +223,16 @@ mod tests {
         assert!(!sessions.update(a, report("5 4 end both mute 0 1").unwrap(), now));
         assert!(sessions.update(a, report("6 3 end both sync 42 0").unwrap(), now));
         assert!(!sessions.update(a, report("6 2 live both sync 55 0").unwrap(), now));
+        sessions.legacy(a, now);
+        assert!(sessions.audio.unwrap().ended);
         assert_eq!(sessions.audio.unwrap().sample.volume, 42);
         assert!(sessions.update(b, report("2 2 live controller mute 12 0").unwrap(), now));
+        sessions.legacy(b, now);
+        assert_eq!(sessions.audio.unwrap().owner, b);
+        sessions.legacy(a, now);
+        assert_eq!(sessions.audio.unwrap().owner, b);
+        assert_eq!(sessions.heartbeat.unwrap().0, b);
+        let now = now + OWNER_GRACE;
         sessions.legacy(a, now);
         assert!(sessions.audio.is_none());
         assert!(!sessions.update(b, report("2 3 end controller mute 12 0").unwrap(), now));
