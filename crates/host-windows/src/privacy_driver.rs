@@ -472,8 +472,40 @@ fn await_output(mut state: Device) -> io::Result<Readiness> {
     }
 }
 
+pub(crate) fn is_mttvdd_present() -> io::Result<bool> {
+    Ok(device()? != Device::Missing)
+}
+
+pub(crate) fn uses_flashlink_directory() -> bool {
+    component_dir()
+        .map(|dir| uses_directory(&dir))
+        .unwrap_or(false)
+}
+
 fn component_dir() -> io::Result<PathBuf> {
     Ok(program_files()?.join("FlashLink Virtual Display 25.7.23"))
+}
+
+fn needs_setup(
+    state: Device,
+    managed: bool,
+    helper_ready: bool,
+    helper_installed: bool,
+    has_pending_settings: bool,
+) -> bool {
+    match state {
+        Device::Missing => true,
+        Device::Unconfigured => managed,
+        Device::Running if managed => !helper_ready || has_pending_settings,
+        Device::Problem(CM_PROB_DISABLED) if managed => {
+            if helper_ready {
+                has_pending_settings
+            } else {
+                helper_installed
+            }
+        }
+        _ => false,
+    }
 }
 
 pub fn prepare(window: HWND) -> Result<Readiness, String> {
@@ -483,17 +515,32 @@ pub fn prepare(window: HWND) -> Result<Readiness, String> {
         }
         let dir = component_dir()?;
         let state = device()?;
-        let setup = match state {
-            Device::Missing => true,
-            Device::Unconfigured => uses_directory(&dir),
-            Device::Running if uses_directory(&dir) => pending_settings(&dir)?.is_some(),
-            _ => false,
-        };
+        let managed = uses_directory(&dir);
+        let helper_ready = managed && super::privacy_vdd_service::is_ready();
+        let helper_exe = dir.join(super::privacy_vdd_protocol::HELPER_EXE_NAME);
+        let helper_installed = managed && helper_exe.is_file();
+        let has_pending_settings = managed
+            && matches!(state, Device::Running | Device::Problem(CM_PROB_DISABLED))
+            && pending_settings(&dir)?.is_some();
+        let setup = needs_setup(
+            state,
+            managed,
+            helper_ready,
+            helper_installed,
+            has_pending_settings,
+        );
         if !setup {
+            if helper_ready && matches!(state, Device::Running | Device::Problem(CM_PROB_DISABLED))
+            {
+                return Ok(Readiness::Ready);
+            }
             return await_output(state);
         }
         if launch(window)? == Readiness::RestartRequired {
             return Ok(Readiness::RestartRequired);
+        }
+        if uses_directory(&dir) && super::privacy_vdd_service::is_ready() {
+            return Ok(Readiness::Ready);
         }
         await_output(device()?)
     })();
@@ -524,11 +571,11 @@ fn provision() -> io::Result<Readiness> {
     match state {
         Device::Missing => {}
         Device::Unconfigured if uses_directory(&dir) => {}
-        Device::Running if uses_directory(&dir) => {
+        Device::Running | Device::Problem(CM_PROB_DISABLED) if uses_directory(&dir) => {
             if let Some(settings) = pending_settings(&dir)? {
                 write_component(&dir.join("vdd_settings.xml"), settings.as_bytes())?;
-                return mark_restart();
             }
+            super::privacy_vdd_service::install_or_update(&dir)?;
             return Ok(Readiness::Ready);
         }
         _ => return await_output(state),
@@ -555,6 +602,7 @@ fn provision() -> io::Result<Readiness> {
     } else {
         register(&inf)?
     };
+    super::privacy_vdd_service::install_or_update(&dir)?;
     if reboot {
         mark_restart()
     } else {
@@ -573,6 +621,29 @@ pub fn setup_exit_code() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_helper_test_build_triggers_upgrade_without_settings_change() {
+        use crate::privacy_vdd_protocol::{
+            is_helper_current, parse_response, HELPER_PROTOCOL_VERSION,
+        };
+
+        let disabled = Device::Problem(CM_PROB_DISABLED);
+        let running = Device::Running;
+        let legacy_ready = is_helper_current(parse_response("READY\n").as_ref());
+        assert!(!legacy_ready);
+        // Legacy PR test build leaves Root\MttVDD disabled with FlashLinkVddHelper.exe present
+        // and no vdd_settings.xml changes: prepare() must still run setup to upgrade the service.
+        assert!(needs_setup(disabled, true, legacy_ready, true, false));
+        assert!(needs_setup(running, true, legacy_ready, true, false));
+
+        let current_wire = format!("READY {HELPER_PROTOCOL_VERSION}\n");
+        let current_ready = is_helper_current(parse_response(&current_wire).as_ref());
+        assert!(current_ready);
+        assert!(!needs_setup(disabled, true, current_ready, true, false));
+        // If the user manually disabled MttVDD without FlashLink's helper installed, do not run setup.
+        assert!(!needs_setup(disabled, true, false, false, false));
+    }
 
     #[test]
     fn a_present_device_must_be_running_and_free_of_pnp_problems() {

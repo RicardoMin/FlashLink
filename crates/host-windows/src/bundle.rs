@@ -65,6 +65,50 @@ fn hash_file(path: &Path) -> io::Result<String> {
     Ok(format!("{:x}", hash.finalize()))
 }
 
+pub fn write_pure_executable(dest: &Path) -> io::Result<()> {
+    let current = env::current_exe()?;
+    let length = match Bundle::open(&current)? {
+        Some(bundle) => Some(bundle.zip_offset),
+        None => None,
+    };
+    let parent = dest
+        .parent()
+        .ok_or_else(|| io::Error::other("目标可执行文件路径无效"))?;
+    let temp = parent.join(format!("helper-{}.tmp", nonce()?));
+    let mut src = fs::File::open(&current)?;
+    let write_res = (|| -> io::Result<()> {
+        let mut out = fs::File::create_new(&temp)?;
+        match length {
+            Some(limit) => {
+                let copied = io::copy(&mut (&mut src).take(limit), &mut out)?;
+                if copied != limit {
+                    return Err(io::Error::other("复制主机可执行文件不完整"));
+                }
+            }
+            None => {
+                io::copy(&mut src, &mut out)?;
+            }
+        }
+        out.sync_all()
+    })();
+    if let Err(e) = write_res {
+        let _ = fs::remove_file(&temp);
+        return Err(e);
+    }
+    let mut last_err = None;
+    for _ in 0..20 {
+        match fs::rename(&temp, dest) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last_err = Some(e);
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    }
+    let _ = fs::remove_file(&temp);
+    Err(last_err.unwrap_or_else(|| io::Error::other("替换虚拟屏助手程序失败")))
+}
+
 pub fn relaunch_installed() -> io::Result<bool> {
     let current = env::current_exe()?;
     if Bundle::open(&current)?.is_none() {
