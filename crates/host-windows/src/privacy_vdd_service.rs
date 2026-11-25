@@ -15,8 +15,8 @@ use super::{
     privacy_vdd_protocol::{
         apply_service_update, format_request, format_response, is_helper_current, parse_request,
         parse_response, service_command_line, LeaseAction, LeaseTracker, Request, Response,
-        StopOutcome, HELPER_EXE_NAME, HELPER_PROTOCOL_VERSION, MAX_LINE_BYTES, PIPE_NAME, PIPE_SDDL,
-        SERVICE_DESCRIPTION, SERVICE_DISPLAY_NAME, SERVICE_NAME,
+        StopOutcome, HELPER_EXE_NAME, HELPER_PROTOCOL_VERSION, MAX_LINE_BYTES, PIPE_NAME,
+        PIPE_SDDL, SERVICE_DESCRIPTION, SERVICE_DISPLAY_NAME, SERVICE_NAME,
     },
 };
 use std::{
