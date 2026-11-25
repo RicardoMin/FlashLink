@@ -39,8 +39,8 @@ use windows_sys::Win32::{
         LocalFree, ERROR_BROKEN_PIPE, ERROR_CALL_NOT_IMPLEMENTED, ERROR_FILE_NOT_FOUND,
         ERROR_IO_PENDING, ERROR_NO_MORE_ITEMS, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED,
         ERROR_SERVICE_ALREADY_RUNNING, ERROR_SERVICE_CANNOT_ACCEPT_CTRL,
-        ERROR_SERVICE_DOES_NOT_EXIST, ERROR_SERVICE_NOT_ACTIVE, GENERIC_READ, GENERIC_WRITE,
-        HANDLE, INVALID_HANDLE_VALUE, NO_ERROR, WAIT_OBJECT_0,
+        ERROR_SERVICE_DOES_NOT_EXIST, ERROR_SERVICE_NOT_ACTIVE, HANDLE, INVALID_HANDLE_VALUE,
+        NO_ERROR, WAIT_OBJECT_0,
     },
     Security::{
         Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1},
@@ -48,7 +48,8 @@ use windows_sys::Win32::{
     },
     Storage::FileSystem::{
         CreateFileW, FlushFileBuffers, ReadFile, WriteFile, FILE_FLAG_FIRST_PIPE_INSTANCE,
-        FILE_FLAG_OVERLAPPED, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
+        FILE_FLAG_OVERLAPPED, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_WRITE_DATA, OPEN_EXISTING,
+        PIPE_ACCESS_DUPLEX, SYNCHRONIZE,
     },
     System::{
         Pipes::{
@@ -64,6 +65,8 @@ use windows_sys::Win32::{
 const CONFIGFLAG_DISABLED: u32 = 0x0000_0001;
 const SERVICE_ALL_ACCESS_MASK: u32 = 0x000F_01FF;
 const SC_MANAGER_ALL_ACCESS_MASK: u32 = 0x000F_003F;
+const CLIENT_OPEN_ACCESS: u32 =
+    FILE_READ_DATA | FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
 
 static STATUS_HANDLE: AtomicUsize = AtomicUsize::new(0);
 static STOP_EVENT_RAW: AtomicUsize = AtomicUsize::new(0);
@@ -238,6 +241,10 @@ unsafe extern "system" fn service_ctrl_handler(
 }
 
 fn create_pipe_instance(first: bool) -> io::Result<OwnedHandle> {
+    create_pipe_instance_named(PIPE_NAME, first)
+}
+
+fn create_pipe_instance_named(pipe_name: &str, first: bool) -> io::Result<OwnedHandle> {
     let sddl = wide(PIPE_SDDL);
     let mut sd: *mut c_void = ptr::null_mut();
     let ok = unsafe {
@@ -261,7 +268,7 @@ fn create_pipe_instance(first: bool) -> io::Result<OwnedHandle> {
         open_mode |= FILE_FLAG_FIRST_PIPE_INSTANCE;
     }
     let pipe_mode = PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS;
-    let name = wide(PIPE_NAME);
+    let name = wide(pipe_name);
     let handle =
         unsafe { CreateNamedPipeW(name.as_ptr(), open_mode, pipe_mode, 8, 512, 512, 1000, &sa) };
     let err = io::Error::last_os_error();
@@ -798,12 +805,16 @@ pub fn install_or_update(vdd_dir: &Path) -> io::Result<()> {
 }
 
 fn open_client_pipe() -> io::Result<Option<OwnedHandle>> {
-    let name = wide(PIPE_NAME);
+    open_client_pipe_named(PIPE_NAME)
+}
+
+fn open_client_pipe_named(pipe_name: &str) -> io::Result<Option<OwnedHandle>> {
+    let name = wide(pipe_name);
     for _ in 0..4 {
         let handle = unsafe {
             CreateFileW(
                 name.as_ptr(),
-                GENERIC_READ | GENERIC_WRITE,
+                CLIENT_OPEN_ACCESS,
                 0,
                 ptr::null(),
                 OPEN_EXISTING,
@@ -956,5 +967,140 @@ pub fn ensure_disabled_if_managed() {
         if write_sync(raw, format_request(Request::Disable).as_bytes()).is_ok() {
             let _ = read_line_sync(raw);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows_sys::Win32::{
+        Foundation::{GENERIC_ALL, GENERIC_WRITE},
+        Security::{
+            AclSizeInformation, CreateWellKnownSid, EqualSid, GetAce, GetAclInformation,
+            GetSecurityDescriptorDacl, WinInteractiveSid, ACCESS_ALLOWED_ACE, ACL,
+            ACL_SIZE_INFORMATION,
+        },
+        Storage::FileSystem::{FILE_CREATE_PIPE_INSTANCE, FILE_WRITE_ATTRIBUTES},
+    };
+
+    #[test]
+    fn parsed_pipe_dacl_denies_create_pipe_instance_to_interactive_users() {
+        assert_eq!(CLIENT_OPEN_ACCESS, crate::privacy_vdd_protocol::CLIENT_PIPE_ACCESS);
+        assert_eq!(CLIENT_OPEN_ACCESS & FILE_CREATE_PIPE_INSTANCE, 0);
+
+        let sddl = wide(PIPE_SDDL);
+        let mut sd: *mut c_void = ptr::null_mut();
+        assert_ne!(
+            unsafe {
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    sddl.as_ptr(),
+                    SDDL_REVISION_1,
+                    &mut sd,
+                    ptr::null_mut(),
+                )
+            },
+            0
+        );
+        let mut present = 0;
+        let mut dacl: *mut ACL = ptr::null_mut();
+        let mut defaulted = 0;
+        assert_ne!(
+            unsafe { GetSecurityDescriptorDacl(sd, &mut present, &mut dacl, &mut defaulted) },
+            0
+        );
+        assert_ne!(present, 0);
+        assert!(!dacl.is_null());
+
+        let mut info = ACL_SIZE_INFORMATION::default();
+        assert_ne!(
+            unsafe {
+                GetAclInformation(
+                    dacl,
+                    (&mut info as *mut ACL_SIZE_INFORMATION).cast(),
+                    size_of::<ACL_SIZE_INFORMATION>() as u32,
+                    AclSizeInformation,
+                )
+            },
+            0
+        );
+
+        let mut iu_sid = [0u8; 68];
+        let mut iu_sid_len = iu_sid.len() as u32;
+        assert_ne!(
+            unsafe {
+                CreateWellKnownSid(
+                    WinInteractiveSid,
+                    ptr::null_mut(),
+                    iu_sid.as_mut_ptr().cast(),
+                    &mut iu_sid_len,
+                )
+            },
+            0
+        );
+
+        let mut found_iu = false;
+        for idx in 0..info.AceCount {
+            let mut ace_ptr: *mut c_void = ptr::null_mut();
+            assert_ne!(unsafe { GetAce(dacl, idx, &mut ace_ptr) }, 0);
+            let ace = unsafe { &*(ace_ptr as *const ACCESS_ALLOWED_ACE) };
+            let sid_ptr = (&ace.SidStart as *const u32).cast::<c_void>().cast_mut();
+            if unsafe { EqualSid(sid_ptr, iu_sid.as_mut_ptr().cast()) } != 0 {
+                found_iu = true;
+                assert_eq!(ace.Mask, CLIENT_OPEN_ACCESS);
+                assert_eq!(ace.Mask & FILE_CREATE_PIPE_INSTANCE, 0);
+                assert_eq!(ace.Mask & FILE_WRITE_ATTRIBUTES, 0);
+                assert_eq!(ace.Mask & GENERIC_WRITE, 0);
+                assert_eq!(ace.Mask & GENERIC_ALL, 0);
+            }
+        }
+        unsafe {
+            LocalFree(sd);
+        }
+        assert!(found_iu, "PIPE_SDDL must contain an Interactive Users ACE");
+    }
+
+    #[test]
+    fn client_pipe_access_supports_duplex_round_trip() {
+        let pipe_name = format!(r"\\.\pipe\FlashLinkVddHelperAclTest-{}", std::process::id());
+        let server = create_pipe_instance_named(&pipe_name, true).unwrap();
+        let stop_event = create_event(true).unwrap();
+        let stop_raw = stop_event.as_raw_handle() as usize;
+        let handle = thread::spawn(move || {
+            let connect_ev = create_event(true).unwrap();
+            let mut ov = OVERLAPPED::default();
+            ov.hEvent = connect_ev.as_raw_handle();
+            let connected = unsafe { ConnectNamedPipe(server.as_raw_handle(), &mut ov) } != 0
+                || match io::Error::last_os_error().raw_os_error().map(|c| c as u32) {
+                    Some(ERROR_PIPE_CONNECTED) => true,
+                    Some(ERROR_IO_PENDING) => wait_overlapped(
+                        server.as_raw_handle(),
+                        &ov,
+                        connect_ev.as_raw_handle(),
+                        stop_raw as HANDLE,
+                    )
+                    .is_ok(),
+                    _ => false,
+                };
+            assert!(connected);
+            let req = read_line_overlapped(server.as_raw_handle(), stop_raw as HANDLE)
+                .unwrap()
+                .unwrap();
+            assert_eq!(parse_request(&req), Some(Request::Status));
+            write_all_overlapped(
+                server.as_raw_handle(),
+                format_response(&Response::Ready).as_bytes(),
+                stop_raw as HANDLE,
+            )
+            .unwrap();
+            unsafe {
+                DisconnectNamedPipe(server.as_raw_handle());
+            }
+        });
+
+        let client = open_client_pipe_named(&pipe_name).unwrap().unwrap();
+        write_sync(client.as_raw_handle(), format_request(Request::Status).as_bytes()).unwrap();
+        let resp = read_line_sync(client.as_raw_handle()).unwrap();
+        assert_eq!(parse_response(&resp), Some(Response::Ready));
+        handle.join().unwrap();
     }
 }

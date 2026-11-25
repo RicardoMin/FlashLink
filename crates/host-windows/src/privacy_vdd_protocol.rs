@@ -10,8 +10,28 @@ pub const SERVICE_DESCRIPTION: &str =
     "仅在 FlashLink 隐私模式期间动态启用和停用虚拟显示器（Root\\MttVDD）。";
 pub const PIPE_NAME: &str = r"\\.\pipe\FlashLinkVddHelper";
 pub const HELPER_EXE_NAME: &str = "FlashLinkVddHelper.exe";
-/// Allow only LocalSystem (SY), Built-in Administrators (BA), and Interactive Users (IU).
-pub const PIPE_SDDL: &str = "D:(A;;GRGW;;;SY)(A;;GRGW;;;BA)(A;;GRGW;;;IU)";
+#[cfg(test)]
+pub const PIPE_RIGHT_READ_DATA: u32 = 0x0000_0001;
+#[cfg(test)]
+pub const PIPE_RIGHT_WRITE_DATA: u32 = 0x0000_0002;
+#[cfg(test)]
+pub const PIPE_RIGHT_CREATE_INSTANCE: u32 = 0x0000_0004;
+#[cfg(test)]
+pub const PIPE_RIGHT_READ_ATTRIBUTES: u32 = 0x0000_0080;
+#[cfg(test)]
+pub const PIPE_RIGHT_SYNCHRONIZE: u32 = 0x0010_0000;
+/// Least-privilege client access mask for synchronous duplex pipe I/O + WaitNamedPipeW.
+/// Explicitly omits FILE_CREATE_PIPE_INSTANCE (0x0000_0004) so non-elevated users cannot
+/// create competing server instances on the same pipe name.
+#[cfg(test)]
+pub const CLIENT_PIPE_ACCESS: u32 = PIPE_RIGHT_READ_DATA
+    | PIPE_RIGHT_WRITE_DATA
+    | PIPE_RIGHT_READ_ATTRIBUTES
+    | PIPE_RIGHT_SYNCHRONIZE;
+/// Allow LocalSystem (SY) and Built-in Administrators (BA) full pipe access, and
+/// Interactive Users (IU) only the specific client I/O mask (`0x00100083`), excluding
+/// `FILE_CREATE_PIPE_INSTANCE`.
+pub const PIPE_SDDL: &str = "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x00100083;;;IU)";
 pub const MAX_LINE_BYTES: usize = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -297,6 +317,16 @@ mod tests {
     fn persists_reduced_set_reapply_only_when_vdd_is_dynamically_managed() {
         assert_eq!(reapply_persistence(true), ApplyPersistence::SaveToDatabase);
         assert_eq!(reapply_persistence(false), ApplyPersistence::Transient);
+    }
+
+    #[test]
+    fn pipe_sddl_restricts_interactive_users_to_client_access_without_create_instance() {
+        assert_eq!(CLIENT_PIPE_ACCESS, 0x0010_0083);
+        assert_eq!(CLIENT_PIPE_ACCESS & PIPE_RIGHT_CREATE_INSTANCE, 0);
+        let expected_ace = format!("(A;;0x{CLIENT_PIPE_ACCESS:08x};;;IU)");
+        assert!(PIPE_SDDL.contains(&expected_ace));
+        assert!(!PIPE_SDDL.contains("GW;;;IU)"));
+        assert!(!PIPE_SDDL.contains("GA;;;IU)"));
     }
 
     #[test]
