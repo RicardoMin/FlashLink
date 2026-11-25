@@ -22,8 +22,8 @@ public final class FlashLinkAudio {
     static final String CONTROLLER = "controller";
     static final String HOST = "host";
     private static final String BOTH = "both";
-    private static final String[] ROUTES = {CONTROLLER, HOST, BOTH};
-    private static final String[] DESTINATIONS = {"仅手机或平板播放", "仅电脑播放", "两端同时播放"};
+    private static final String[] ROUTES = {BOTH, CONTROLLER, HOST};
+    private static final String[] DESTINATIONS = {"两端同时播放", "仅手机或平板播放", "仅电脑播放"};
     private static final String[] POLICIES = {"sync", "mute"};
     private static final String[] ACTIONS = {"跟随手机或平板的媒体音量", "保持电脑静音"};
 
@@ -31,10 +31,12 @@ public final class FlashLinkAudio {
 
     static String route(Context context) {
         SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(context);
-        // Older versions exposed Moonlight's "play audio on PC" checkbox (both ends).
-        String fallback = prefs.getBoolean("checkbox_host_audio", false) ? BOTH : CONTROLLER;
-        String value = prefs.getString(ROUTE, fallback);
-        return HOST.equals(value) || BOTH.equals(value) ? value : CONTROLLER;
+        String value = prefs.getString(ROUTE, null);
+        if (value == null) {
+            // Honor the old "play audio on PC" setting when present. New installs play on both.
+            return prefs.getBoolean("checkbox_host_audio", true) ? BOTH : CONTROLLER;
+        }
+        return CONTROLLER.equals(value) || HOST.equals(value) ? value : BOTH;
     }
 
     static String after(Context context) {
