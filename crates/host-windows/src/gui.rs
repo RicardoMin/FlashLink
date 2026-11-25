@@ -719,7 +719,10 @@ pub fn window(options: Options) -> Result<(), String> {
 }
 
 fn export_report(directory: &Path) -> Result<String, String> {
-    export_report_to(directory, None)
+    match export_report_to(directory, None) {
+        Ok(path) => Ok(path),
+        Err(_) => Err("请检查文稿文件夹写入权限及 PowerShell 的执行状态。".into()),
+    }
 }
 
 fn export_report_to(directory: &Path, output_dir: Option<&Path>) -> Result<String, String> {
@@ -738,6 +741,8 @@ fn export_report_to(directory: &Path, output_dir: Option<&Path>) -> Result<Strin
     );
     process
         .args(["-NoProfile", "-NonInteractive", "-Command", &command])
+        // Clear PSModulePath so pwsh 7 modules do not shadow Windows PowerShell 5.1 modules.
+        .env_remove("PSModulePath")
         .env("FLASHLINK_REPORT_STATE", directory)
         .env(
             "FLASHLINK_REPORT_EXE",
@@ -749,7 +754,9 @@ fn export_report_to(directory: &Path, output_dir: Option<&Path>) -> Result<Strin
     }
     let result = process.output().map_err(|e| e.to_string())?;
     if !result.status.success() {
-        return Err("请检查文稿文件夹写入权限及 PowerShell 的执行状态。".into());
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        let detail = stderr.trim();
+        return Err(format!("PowerShell exited with {}: {detail}", result.status));
     }
     Ok(String::from_utf8_lossy(&result.stdout).trim().to_owned())
 }
@@ -799,7 +806,7 @@ mod tests {
         let base = std::env::temp_dir().join(format!("flashlink-report-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         let state_dir = base.join("state");
-        let out_dir = base.join("out");
+        let out_dir = base.join("测试报告");
         fs::create_dir_all(&state_dir).unwrap();
         fs::create_dir_all(&out_dir).unwrap();
 
@@ -813,8 +820,14 @@ mod tests {
         fs::write(state_dir.join("flashlink-sunshine.log"), host_log).unwrap();
 
         let exported_path = export_report_to(&state_dir, Some(&out_dir)).unwrap();
+        assert!(
+            Path::new(&exported_path).starts_with(&out_dir),
+            "unexpected exported path: {exported_path}"
+        );
         let raw = fs::read_to_string(&exported_path).unwrap();
         assert!(raw.len() < 64 * 1024, "report too large: {}", raw.len());
+        let escaped_state = state_dir.to_string_lossy().replace('\\', "\\\\");
+        assert!(!raw.contains(&escaped_state), "leaked local state path");
         for forbidden in [
             "\"PSProvider\"",
             "\"PSDrive\"",

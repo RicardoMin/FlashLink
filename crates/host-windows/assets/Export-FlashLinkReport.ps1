@@ -6,7 +6,8 @@ param(
     [string]$HostExecutable
 )
 $ErrorActionPreference = 'Stop'
-[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+$utf8 = New-Object System.Text.UTF8Encoding($false)
+try { [Console]::OutputEncoding = $utf8 } catch {}
 
 $now = [DateTime]::UtcNow
 $video = @()
@@ -83,6 +84,13 @@ $null = [IO.Directory]::CreateDirectory($OutputDir)
 $id = [Guid]::NewGuid().ToString('N').Substring(0, 8)
 $filename = 'windows-' + $now.ToString('yyyyMMddTHHmmssZ') + '-' + $id + '.json'
 $path = Join-Path $OutputDir $filename
-[IO.File]::WriteAllText($path + '.tmp', ($report | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding($false)))
+[IO.File]::WriteAllText($path + '.tmp', ($report | ConvertTo-Json -Depth 6), $utf8)
 [IO.File]::Move($path + '.tmp', $path)
-[Console]::WriteLine($path)
+if ([Console]::IsOutputRedirected) {
+    $bytes = $utf8.GetBytes($path + "`n")
+    $stdout = [Console]::OpenStandardOutput()
+    $stdout.Write($bytes, 0, $bytes.Length)
+    $stdout.Flush()
+} else {
+    [Console]::WriteLine($path)
+}
