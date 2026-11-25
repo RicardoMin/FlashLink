@@ -1,5 +1,5 @@
 use super::{
-    service::{self, Action, Event},
+    service::{self, Action, Event, PrivacyControl},
     Options,
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -265,6 +265,17 @@ fn enable(w: HWND, v: bool) {
         windows_sys::Win32::UI::Input::KeyboardAndMouse::EnableWindow(w, v.into());
     }
 }
+fn privacy_control(window: HWND, button: HWND, control: PrivacyControl) {
+    let label = match control {
+        PrivacyControl::Enable => "开启防窥模式",
+        PrivacyControl::Disable => "关闭防窥模式",
+        PrivacyControl::Busy => "防窥模式",
+    };
+    let enabled = control != PrivacyControl::Busy;
+    set_text(button, label);
+    enable(button, enabled);
+    desktop_menu::set_privacy(window, label, enabled);
+}
 fn start(options: Options, events: mpsc::Sender<Event>) -> mpsc::Sender<Action> {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
@@ -387,7 +398,7 @@ pub fn window(options: Options) -> Result<(), String> {
     child(
         main,
         "STATIC",
-        "隐私与显示",
+        "防窥模式",
         PANEL_TITLE as _,
         (217, 316, 486, 31),
         &title,
@@ -395,25 +406,17 @@ pub fn window(options: Options) -> Result<(), String> {
     let note = child(
         main,
         "STATIC",
-        "普通模式会在本机显示桌面。首次开启隐私前，请先安装虚拟屏。",
+        "防窥模式默认关闭。开启后，桌面只在已连接的远程设备上显示。",
         PANEL_TEXT as _,
-        (217, 353, 486, 47),
+        (217, 350, 486, 62),
         &normal,
     );
-    child(
+    let privacy_button = child(
         main,
         "BUTTON",
-        "切换隐私模式",
+        "防窥模式",
         desktop_menu::PRIVACY,
-        (216, 406, 156, 34),
-        &normal,
-    );
-    child(
-        main,
-        "BUTTON",
-        "安装虚拟屏",
-        desktop_menu::VDD,
-        (382, 406, 122, 34),
+        (216, 413, 156, 34),
         &normal,
     );
     visible(retry, false);
@@ -472,6 +475,8 @@ pub fn window(options: Options) -> Result<(), String> {
         &normal,
     );
     desktop_menu::attach_menu(main);
+    let mut privacy = PrivacyControl::Busy;
+    privacy_control(main, privacy_button, privacy);
     let mut tray = desktop_menu::Tray::install(main);
     SHELL_RESTARTED.with(|id| id.set(tray.shell_restarted));
     visible(main, true);
@@ -511,6 +516,8 @@ pub fn window(options: Options) -> Result<(), String> {
                     enable(firewall, false);
                     visible(consent, false);
                     visible(retry, false);
+                    privacy = PrivacyControl::Busy;
+                    privacy_control(main, privacy_button, privacy);
                     let (heading, explanation)=match state {
                         Desktop::Recovering=>("正在恢复显示","恢复原显示配置后，主机会在桌面可用时自动上线。如果 Windows 暂时拒绝恢复，可在本机解锁后通过“主机 → 本机恢复显示…”确认。"),
                         Desktop::Locked=>("等待本机解锁","Windows 已锁定。请在电脑上解锁，手机和平板随后即可重新发现并直连。"),
@@ -519,19 +526,26 @@ pub fn window(options: Options) -> Result<(), String> {
                     };
                     set_text(phase, heading);
                     set_text(details, explanation);
-                    set_text(note, "附近发现和设备授权已暂停，原有配对记录保留。");
-                }
-                Event::Online { base, exe, address } => {
                     set_text(
                         note,
-                        "普通模式会在本机显示桌面。可从“主机”菜单安装虚拟屏并开启隐私。",
+                        if state == Desktop::Recovering {
+                            "正在恢复实体屏，请等待恢复完成。"
+                        } else {
+                            "请在本机解锁 Windows 后使用防窥模式。"
+                        },
                     );
+                }
+                Event::Online { base, exe, address } => {
                     set_text(phase, "已就绪，等待手机或平板连接");
                     set_text(details,&format!("电脑地址   {address}:{base}\r\n在手机或平板的“我的设备”中选择这台电脑。首次连接时，两端会显示同一个确认码。"));
                     connection = Some((exe, base));
                     enable(firewall, true);
                 }
-                Event::Privacy(text) => set_text(note, &text),
+                Event::Privacy(control, text) => {
+                    privacy = control;
+                    privacy_control(main, privacy_button, privacy);
+                    set_text(note, &text);
+                }
                 Event::Status(text) => set_text(phase, &text),
                 Event::Ask {
                     id,
@@ -560,6 +574,9 @@ pub fn window(options: Options) -> Result<(), String> {
                 }
                 Event::Failed(text) => {
                     connection = None;
+                    privacy = PrivacyControl::Busy;
+                    privacy_control(main, privacy_button, privacy);
+                    set_text(note, "主机未就绪。请先重新启动串流引擎。");
                     enable(firewall, false);
                     pending = None;
                     visible(consent, false);
@@ -572,7 +589,7 @@ pub fn window(options: Options) -> Result<(), String> {
         for message in fw_rx.try_iter() {
             firewall_active = false;
             enable(firewall, connection.is_some());
-            set_text(note, &message);
+            notice(&message);
         }
         for result in report_rx.try_iter() {
             exporting = false;
@@ -603,11 +620,15 @@ pub fn window(options: Options) -> Result<(), String> {
                         });
                     }
                 }
-                Input::Button(desktop_menu::PRIVACY) => {
-                    if connection.is_some() {
-                        let _ = commands.send(Action::TogglePrivacy);
-                    } else {
-                        notice("请先等待主机就绪。");
+                Input::Button(desktop_menu::PRIVACY)
+                    if connection.is_some() && privacy != PrivacyControl::Busy =>
+                {
+                    if commands
+                        .send(Action::SetPrivacy(privacy == PrivacyControl::Enable))
+                        .is_ok()
+                    {
+                        privacy = PrivacyControl::Busy;
+                        privacy_control(main, privacy_button, privacy);
                     }
                 }
                 Input::Button(desktop_menu::RESTORE) => {
@@ -628,11 +649,6 @@ pub fn window(options: Options) -> Result<(), String> {
                         {
                             notice(&e);
                         }
-                    }
-                }
-                Input::Button(desktop_menu::VDD) => {
-                    if let Err(e) = super::privacy_driver::launch(main) {
-                        notice(&e);
                     }
                 }
                 Input::Button(desktop_menu::OPEN) => {
