@@ -21,6 +21,8 @@ reconnection, in-stream touch controls and aggregate performance measurements. M
 input preference to support switching between direct touch and trackpad during a stream.
 2026-11-24: extend Game, the decoder and the connection lifecycle to renegotiate
 stream quality and confirm the new settings when the first decoded frame reaches the surface.
+2026-11-25: expose audio routing in stream settings and keep the Android audio track
+active while its output is muted for computer-only playback.
 This integration is built by apps/android/build.py and apps/android/moonlight-v12.1.patch.
 Distributors of the combined APK should provide the complete corresponding source
 and build scripts for the exact binary with the distribution.
