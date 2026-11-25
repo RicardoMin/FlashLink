@@ -107,7 +107,8 @@ impl PrivacySetup {
             ),
             Self::Checked(Ok(Readiness::RestartRequired)) => (
                 Busy,
-                "Windows 要求本次安装重启一次后生效，后续日常开关无需重启。当前仍可使用普通串流。".into(),
+                "Windows 要求本次安装重启一次后生效，后续日常开关无需重启。当前仍可使用普通串流。"
+                    .into(),
             ),
             Self::Checked(Err(e)) => (Enable, format!("点击“开启防窥模式”可重试。\r\n{e}")),
         };

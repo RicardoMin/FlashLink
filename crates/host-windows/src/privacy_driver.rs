@@ -495,8 +495,10 @@ pub fn prepare(window: HWND) -> Result<Readiness, String> {
         let state = device()?;
         let managed = uses_directory(&dir);
         let helper_ready = managed && super::privacy_vdd_service::is_ready();
-        let helper_installed =
-            managed && dir.join(super::privacy_vdd_protocol::HELPER_EXE_NAME).is_file();
+        let helper_installed = managed
+            && dir
+                .join(super::privacy_vdd_protocol::HELPER_EXE_NAME)
+                .is_file();
         let setup = match state {
             Device::Missing => true,
             Device::Unconfigured => managed,
@@ -511,7 +513,8 @@ pub fn prepare(window: HWND) -> Result<Readiness, String> {
             _ => false,
         };
         if !setup {
-            if helper_ready && matches!(state, Device::Running | Device::Problem(CM_PROB_DISABLED)) {
+            if helper_ready && matches!(state, Device::Running | Device::Problem(CM_PROB_DISABLED))
+            {
                 return Ok(Readiness::Ready);
             }
             return await_output(state);

@@ -261,10 +261,10 @@ impl VirtualPlan {
             if actual.refreshRate.Denominator == 0 {
                 return false;
             }
-            let lhs = u64::from(actual.refreshRate.Numerator)
-                * u64::from(wanted.refreshRate.Denominator);
-            let rhs = u64::from(wanted.refreshRate.Numerator)
-                * u64::from(actual.refreshRate.Denominator);
+            let lhs =
+                u64::from(actual.refreshRate.Numerator) * u64::from(wanted.refreshRate.Denominator);
+            let rhs =
+                u64::from(wanted.refreshRate.Numerator) * u64::from(actual.refreshRate.Denominator);
             if lhs != rhs {
                 return false;
             }

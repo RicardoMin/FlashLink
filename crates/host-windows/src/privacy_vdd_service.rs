@@ -262,18 +262,8 @@ fn create_pipe_instance(first: bool) -> io::Result<OwnedHandle> {
     }
     let pipe_mode = PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS;
     let name = wide(PIPE_NAME);
-    let handle = unsafe {
-        CreateNamedPipeW(
-            name.as_ptr(),
-            open_mode,
-            pipe_mode,
-            8,
-            512,
-            512,
-            1000,
-            &sa,
-        )
-    };
+    let handle =
+        unsafe { CreateNamedPipeW(name.as_ptr(), open_mode, pipe_mode, 8, 512, 512, 1000, &sa) };
     let err = io::Error::last_os_error();
     unsafe {
         LocalFree(sd);
@@ -312,7 +302,10 @@ fn wait_overlapped(
         }
         let mut transferred = 0u32;
         let _ = unsafe { GetOverlappedResult(pipe, ov, &mut transferred, 1) };
-        Err(io::Error::new(io::ErrorKind::Interrupted, "service stopping"))
+        Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "service stopping",
+        ))
     }
 }
 
@@ -369,8 +362,15 @@ fn write_all_overlapped(pipe: HANDLE, data: &[u8], stop_event: HANDLE) -> io::Re
         ov.hEvent = io_event.as_raw_handle();
         let mut written = 0u32;
         let chunk = &data[offset..];
-        let ok =
-            unsafe { WriteFile(pipe, chunk.as_ptr(), chunk.len() as u32, &mut written, &mut ov) };
+        let ok = unsafe {
+            WriteFile(
+                pipe,
+                chunk.as_ptr(),
+                chunk.len() as u32,
+                &mut written,
+                &mut ov,
+            )
+        };
         let n = if ok != 0 {
             written
         } else {
@@ -817,11 +817,9 @@ fn open_client_pipe() -> io::Result<Option<OwnedHandle>> {
         let err = io::Error::last_os_error();
         match err.raw_os_error().map(|c| c as u32) {
             Some(ERROR_FILE_NOT_FOUND) => return Ok(None),
-            Some(ERROR_PIPE_BUSY) => {
-                unsafe {
-                    WaitNamedPipeW(name.as_ptr(), 1000);
-                }
-            }
+            Some(ERROR_PIPE_BUSY) => unsafe {
+                WaitNamedPipeW(name.as_ptr(), 1000);
+            },
             _ => return Err(err),
         }
     }
@@ -888,13 +886,15 @@ impl VddLease {
     /// Returns `Ok(None)` when the helper service is not installed or does not
     /// manage MttVDD on this machine (allowing graceful fallback to legacy static MttVDD).
     pub fn try_acquire() -> Result<Option<Self>, String> {
-        let Some(pipe) =
-            open_client_pipe().map_err(|e| format!("连接虚拟屏辅助服务失败：{e}"))?
+        let Some(pipe) = open_client_pipe().map_err(|e| format!("连接虚拟屏辅助服务失败：{e}"))?
         else {
             return Ok(None);
         };
-        write_sync(pipe.as_raw_handle(), format_request(Request::Acquire).as_bytes())
-            .map_err(|e| format!("请求启用虚拟屏失败：{e}"))?;
+        write_sync(
+            pipe.as_raw_handle(),
+            format_request(Request::Acquire).as_bytes(),
+        )
+        .map_err(|e| format!("请求启用虚拟屏失败：{e}"))?;
         let line = read_line_sync(pipe.as_raw_handle())
             .map_err(|e| format!("等待虚拟屏启用结果失败：{e}"))?;
         match parse_response(&line) {
