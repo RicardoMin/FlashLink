@@ -7,7 +7,7 @@
 ![Status](https://img.shields.io/badge/Status-WIP-blue)
 ![Mode](https://img.shields.io/badge/Mode-LAN%20First-green)
 ![Platforms](https://img.shields.io/badge/Platforms-Windows%20%7C%20Android%20%7C%20iPadOS%20%7C%20macOS-orange)
-![License](https://img.shields.io/badge/License-MIT-blue)
+![License](https://img.shields.io/badge/License-GPL--3.0--only-blue)
 
 ***
 
@@ -92,4 +92,4 @@ FlashLink 正在从零搭建中，欢迎对音视频串流、客户端开发或�
 
 ## 📄 License
 
-本项目采用 [MIT](LICENSE) 协议开源。
+FlashLink 采用 [GNU GPL 第 3 版（GPL-3.0-only）](LICENSE)。此前以 MIT 发布的代码保留[原 MIT 授权](LICENSES/FlashLink-MIT.txt)，第三方组件沿用各自的许可证。

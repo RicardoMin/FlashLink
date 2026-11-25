@@ -711,7 +711,7 @@ pub fn window(options: Options) -> Result<(), String> {
                     {
                         let _ = std::process::Command::new("notepad.exe").arg(file).spawn();
                     } else {
-                        notice("FlashLink 自研代码使用 MIT 许可，Sunshine 使用 GPLv3。详见项目发行包内的开源许可。");
+                        notice("FlashLink 采用 GNU GPL 第 3 版（GPL-3.0-only）。第三方组件的许可证和源码地址见发行包内的开源声明。");
                     }
                 }
                 Input::Button(LOG) => {

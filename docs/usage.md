@@ -85,6 +85,8 @@ python3 test/test_flashlink.py --mode field --android
 
 ## 从源码构建
 
+下载测试包后，可在 GitHub 打开该文件所在的提交，取得同一提交中的 FlashLink 源码、补丁和构建脚本。重新分发安装包时，请随包保留许可证与版权声明，并在下载处一并提供与该构建匹配的完整对应源码，或指明其可免费下载的位置。修改版应包含实际使用的上游版本、改动和构建脚本。
+
 以下命令均从仓库根目录执行。首次构建需要联网获取上游源码和构建依赖。修改应用后，运行受影响平台的默认打包命令，将更新的 [install 测试包](../install/) 和对应源码放进同一个 PR。安卓测试包沿用同一签名，方便已有设备覆盖安装并保留配对数据。两端的第三方组件版本、许可证和源码入口见 [Android 声明](../apps/android/NOTICE.txt) 和 [Windows 声明](../crates/host-windows/assets/NOTICE.txt)。
 
 ### Windows 被控端
