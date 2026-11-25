@@ -16,6 +16,7 @@ import android.widget.FrameLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import com.limelight.binding.audio.AndroidAudioRenderer;
 import com.limelight.nvstream.NvConnection;
 import com.limelight.nvstream.jni.MoonBridge;
 import com.limelight.preferences.PreferenceConfiguration;
@@ -42,6 +43,7 @@ public final class FlashLinkGame extends Game {
     private FlashLinkStreamTools tools;
     private FlashLinkStreamTouch streamTouch;
     private FlashLinkPrivacyLease privacyLease;
+    private AndroidAudioRenderer audioRenderer;
     private FlashLinkQuality activeQuality;
     private volatile FlashLinkQuality pendingQuality;
     private volatile boolean handingOff;
@@ -77,7 +79,10 @@ public final class FlashLinkGame extends Game {
             Log.i(LOG, recoveryDeadline == 0 ? "STREAM_STARTED" : "STREAM_RESUMED");
             privacyLease = FlashLinkPrivacyLease.start(this, getIntent().getStringExtra(EXTRA_HOST),
                     getIntent().getIntExtra(EXTRA_PORT, com.limelight.nvstream.http.NvHTTP.DEFAULT_HTTP_PORT),
-                    getIntent().getByteArrayExtra(EXTRA_SERVER_CERT));
+                    getIntent().getByteArrayExtra(EXTRA_SERVER_CERT), managedAudio());
+            if (!managedAudio() && recoveryDeadline == 0 && pendingQuality == null) {
+                Toast.makeText(this, "当前主机使用兼容音频模式。要控制断开后的电脑音量，请更新 Windows 主机。", Toast.LENGTH_LONG).show();
+            }
             streamReady();
         });
     }
@@ -154,6 +159,10 @@ public final class FlashLinkGame extends Game {
 
     private void handOffQuality(int result, Intent next) {
         handingOff = true;
+        if (privacyLease != null) {
+            privacyLease.handoff();
+            privacyLease = null;
+        }
         timer.removeCallbacks(qualityTimeout);
         releaseControls();
         if (tools != null) tools.setVisible(false);
@@ -181,7 +190,6 @@ public final class FlashLinkGame extends Game {
         runOnUiThread(() -> {
             if (handingOff || isFinishing() || isDestroyed()) return;
             releaseControls();
-            closeLease();
             // Decide alongside the first-frame callback: it may already have committed this profile.
             if (pendingQuality != null) {
                 qualityFailed(code == MoonBridge.ML_ERROR_NO_VIDEO_FRAME || code == MoonBridge.ML_ERROR_NO_VIDEO_TRAFFIC
@@ -189,6 +197,7 @@ public final class FlashLinkGame extends Game {
                         FlashLinkReconnect.transportLost(code) || code == MoonBridge.ML_ERROR_NO_VIDEO_FRAME);
                 return;
             }
+            closeLease(!FlashLinkReconnect.transportLost(code));
             if (!FlashLinkReconnect.transportLost(code) || (startedAt == 0 && recoveryDeadline == 0)) {
                 timer.removeCallbacks(expire);
                 // Upstream collects connectivity diagnostics before displaying its error screen.
@@ -257,6 +266,26 @@ public final class FlashLinkGame extends Game {
                 .putBoolean(PreferenceConfiguration.TOUCHSCREEN_TRACKPAD_PREF_STRING, trackpad).apply();
     }
 
+    private boolean managedAudio() {
+        return getIntent().getBooleanExtra(FlashLinkAudio.MANAGED, false);
+    }
+
+    @Override protected boolean playAudioOnHost() {
+        // The upgraded host captures its ordinary output and controls the physical speaker itself.
+        return managedAudio() || !FlashLinkAudio.CONTROLLER.equals(FlashLinkAudio.route(this));
+    }
+
+    @Override protected AndroidAudioRenderer createAudioRenderer() {
+        audioRenderer = super.createAudioRenderer();
+        audioRenderer.setMuted(FlashLinkAudio.HOST.equals(FlashLinkAudio.route(this)));
+        return audioRenderer;
+    }
+
+    void audioChanged() {
+        if (audioRenderer != null) audioRenderer.setMuted(FlashLinkAudio.HOST.equals(FlashLinkAudio.route(this)));
+        if (privacyLease != null) privacyLease.refresh();
+    }
+
     private void releaseControls() {
         cancelTouchscreenInput();
         if (tools != null) tools.release();
@@ -264,6 +293,7 @@ public final class FlashLinkGame extends Game {
 
     void leaveStream() {
         Log.i(LOG, "MANUAL_EXIT");
+        closeLease(true);
         finish();
     }
 
@@ -290,21 +320,21 @@ public final class FlashLinkGame extends Game {
         if (active) releaseControls();
         if (tools != null && Build.VERSION.SDK_INT >= 26) tools.setVisible(!active);
     }
-    private void closeLease() {
+    private void closeLease(boolean ended) {
         if (privacyLease != null) {
-            privacyLease.close();
+            privacyLease.close(ended);
             privacyLease = null;
         }
     }
 
     @Override protected void onStop() {
-        closeLease();
+        closeLease(true);
         super.onStop();
     }
 
     @Override protected void onDestroy() {
         releaseControls();
-        closeLease();
+        closeLease(true);
         timer.removeCallbacksAndMessages(null);
         super.onDestroy();
     }

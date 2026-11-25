@@ -1,6 +1,7 @@
 fn main() {
     if std::env::var_os("CARGO_CFG_WINDOWS").is_some() {
         println!("cargo:rerun-if-changed=src/desktop_icons.cpp");
+        println!("cargo:rerun-if-changed=src/audio_endpoint.cpp");
         cc::Build::new()
             .cpp(true)
             .flag_if_supported(
@@ -11,7 +12,8 @@ fn main() {
                 },
             )
             .file("src/desktop_icons.cpp")
-            .compile("desktop_icons");
+            .file("src/audio_endpoint.cpp")
+            .compile("flashlink_windows");
         for lib in ["shell32", "ole32", "oleaut32", "uuid", "user32"] {
             println!("cargo:rustc-link-lib={lib}");
         }
