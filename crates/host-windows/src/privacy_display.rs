@@ -477,6 +477,13 @@ impl Topology {
         Self::query(QDC_ONLY_ACTIVE_PATHS)
     }
 
+    pub fn privacy_target_available() -> Result<bool> {
+        Ok(Self::query(QDC_ALL_PATHS)?
+            .paths
+            .iter()
+            .any(available_privacy_path))
+    }
+
     fn apply_config(
         &self,
         log_dir: Option<&Path>,
@@ -786,7 +793,7 @@ impl Topology {
             .paths
             .iter()
             .copied()
-            .filter(|p| p.targetInfo.targetAvailable != 0 && is_mttvdd(p.targetInfo.adapterId))
+            .filter(available_privacy_path)
             .collect();
         candidates.sort_by_key(|p| {
             candidate_sort_key(
@@ -808,7 +815,7 @@ impl Topology {
         );
         if candidates.is_empty() {
             return Err(
-                "未找到已启用的虚拟显示器。请先在电脑上点“安装虚拟屏”，安装后重新连接桌面。".into(),
+                "Windows 尚未提供防窥显示输出。请稍后再点“开启防窥模式”。如果 Windows 提示需要重启，请先重启电脑。".into(),
             );
         }
 
@@ -1314,6 +1321,10 @@ impl Drop for Devices {
             SetupDiDestroyDeviceInfoList(self.0);
         }
     }
+}
+
+fn available_privacy_path(path: &DISPLAYCONFIG_PATH_INFO) -> bool {
+    path.targetInfo.targetAvailable != 0 && is_mttvdd(path.targetInfo.adapterId)
 }
 
 fn is_mttvdd(adapter: LUID) -> bool {

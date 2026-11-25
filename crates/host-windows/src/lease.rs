@@ -38,13 +38,15 @@ impl PairedClients {
     }
 }
 pub fn sole_owner(dir: &Path) -> Result<[u8; 32], String> {
-    let certs = PairedClients(dir.join("flashlink-state.json"))
-        .enabled()
-        .map_err(|e| e.to_string())?;
-    if certs.len() != 1 {
-        return Err("开启隐私需要恰好一台已授权设备。请在设备管理中移除其余设备。".into());
+    let certs = match PairedClients(dir.join("flashlink-state.json")).enabled() {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
+        result => result.map_err(|e| e.to_string())?,
+    };
+    match certs.as_slice() {
+        [cert] => Ok(Sha256::digest(cert.as_ref()).into()),
+        [] => Err("请先在安卓设备上连接这台电脑并完成配对，再开启防窥模式。".into()),
+        _ => Err("开启防窥模式需要恰好一台已授权设备。请在设备管理中移除其余设备。".into()),
     }
-    Ok(Sha256::digest(certs[0].as_ref()).into())
 }
 impl ClientCertVerifier for PairedClients {
     fn client_auth_mandatory(&self) -> bool {
@@ -118,6 +120,9 @@ mod tests {
         };
         let leaf = CertificateDer::from_pem_slice(a.as_bytes()).unwrap();
         let verifier = PairedClients(file.clone());
+        assert!(sole_owner(&dir).unwrap_err().contains("完成配对"));
+        write(json!([]));
+        assert!(sole_owner(&dir).unwrap_err().contains("完成配对"));
         write(json!([{"cert":a,"enabled":"true"},{"cert":b,"enabled":"false"}]));
         assert_eq!(
             sole_owner(&dir).unwrap(),
@@ -127,7 +132,7 @@ mod tests {
             .verify_client_cert(&leaf, &[], UnixTime::now())
             .is_ok());
         write(json!([{"cert":a},{"cert":b,"enabled":true}]));
-        assert!(sole_owner(&dir).is_err());
+        assert!(sole_owner(&dir).unwrap_err().contains("其余设备"));
         write(json!([{"cert":a,"enabled":false},{"cert":b,"enabled":true}]));
         assert!(verifier
             .verify_client_cert(&leaf, &[], UnixTime::now())

@@ -171,17 +171,12 @@ fn main() -> ExitCode {
     {
         let mut args = env::args_os().skip(1);
         let op = args.next();
-        if op.as_deref() == Some(std::ffi::OsStr::new("--install-privacy-display")) {
-            return match privacy_driver::install() {
-                Ok(msg) => {
-                    gui::notice(&msg);
-                    ExitCode::SUCCESS
-                }
-                Err(e) => {
-                    gui::notice(&format!("安装虚拟屏失败：{e}"));
-                    ExitCode::FAILURE
-                }
-            };
+        if op.as_deref() == Some(std::ffi::OsStr::new(privacy_driver::SETUP_ARGUMENT)) {
+            if args.next().is_some() {
+                return ExitCode::FAILURE;
+            }
+            // ExitCode::from(u8) cannot carry full Windows setup errors or restart-required (3010).
+            std::process::exit(privacy_driver::setup_exit_code());
         }
         if op.as_deref() == Some(std::ffi::OsStr::new("--privacy-guard"))
             || op.as_deref() == Some(std::ffi::OsStr::new("--privacy-recover"))

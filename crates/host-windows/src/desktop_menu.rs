@@ -12,7 +12,6 @@ pub const DEVICES: usize = 2102;
 pub const EXIT: usize = 2103;
 pub const REPORT: usize = 2104;
 pub const PRIVACY: usize = 2105;
-pub const VDD: usize = 2106;
 pub const RESTORE: usize = 2107;
 
 fn add(menu: HMENU, id: usize, title: &str) {
@@ -23,14 +22,22 @@ pub fn attach_menu(window: HWND) {
     unsafe {
         let bar = CreateMenu();
         let actions = CreatePopupMenu();
-        add(actions, PRIVACY, "切换隐私模式");
+        add(actions, PRIVACY, "防窥模式");
         add(actions, RESTORE, "本机恢复显示…");
-        add(actions, VDD, "安装虚拟屏…");
         add(actions, DEVICES, "管理已授权设备…");
         add(actions, REPORT, "导出测试报告…");
         add(actions, EXIT, "退出主机");
         AppendMenuW(bar, MF_POPUP, actions as usize, wide("主机(&H)").as_ptr());
         SetMenu(window, bar);
+    }
+}
+
+pub fn set_privacy(window: HWND, label: &str, enabled: bool) {
+    unsafe {
+        let menu = GetSubMenu(GetMenu(window), 0);
+        let flags = MF_BYCOMMAND | MF_STRING | if enabled { MF_ENABLED } else { MF_GRAYED };
+        ModifyMenuW(menu, PRIVACY as u32, flags, PRIVACY, wide(label).as_ptr());
+        DrawMenuBar(window);
     }
 }
 

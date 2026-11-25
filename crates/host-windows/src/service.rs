@@ -2,6 +2,7 @@ use super::{
     check_ports, check_recovery_files, default_executable,
     lan::Nearby,
     management::{Api, Credentials},
+    privacy_driver::Readiness,
     privacy_time::{desktop_state, Desktop},
     profile::Profile,
     ready,
@@ -14,13 +15,13 @@ use std::{
     os::windows::process::CommandExt,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::mpsc::{Receiver, RecvTimeoutError, Sender},
+    sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError},
     time::{Duration, Instant},
 };
 
 pub enum Event {
     Paused(Desktop),
-    Privacy(String),
+    Privacy(PrivacyControl, String),
     Devices(Result<Vec<super::management::PairedDevice>, String>),
     Status(String),
     Online {
@@ -38,11 +39,80 @@ pub enum Event {
     Failed(String),
 }
 pub enum Action {
-    TogglePrivacy,
+    SetPrivacy(bool),
     ListDevices,
     Revoke(String),
     Answer(String, bool),
     Stop,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PrivacyControl {
+    Enable,
+    Disable,
+    Busy,
+}
+
+// The setup worker can wait for Windows consent while discovery and pairing continue.
+// Its result survives lock/unlock; an intent to enter privacy belongs to one engine session.
+enum PrivacySetup {
+    New,
+    Checking(Receiver<Result<Readiness, String>>),
+    Checked(Result<Readiness, String>),
+}
+
+impl PrivacySetup {
+    fn start(&mut self) {
+        if matches!(
+            self,
+            Self::Checking(_) | Self::Checked(Ok(Readiness::RestartRequired))
+        ) {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(super::privacy_driver::prepare(std::ptr::null_mut()));
+        });
+        *self = Self::Checking(rx);
+    }
+
+    fn poll(&mut self, request: &mut Option<[u8; 32]>, ui: &Sender<Event>) -> Option<[u8; 32]> {
+        let Self::Checking(rx) = self else {
+            return None;
+        };
+        let outcome = match rx.try_recv() {
+            Ok(outcome) => outcome,
+            Err(TryRecvError::Empty) => return None,
+            Err(TryRecvError::Disconnected) => Err("准备过程意外中断。".into()),
+        };
+        *self = Self::Checked(outcome);
+        let owner = request.take();
+        if owner.is_some() && matches!(self, Self::Checked(Ok(Readiness::Ready))) {
+            return owner;
+        }
+        self.show(ui);
+        None
+    }
+
+    fn show(&self, ui: &Sender<Event>) {
+        use PrivacyControl::{Busy, Enable};
+        let (control, message) = match self {
+            Self::New | Self::Checking(_) => (
+                Busy,
+                "正在准备内置防窥功能。若 Windows 请求授权，请在电脑上确认。".into(),
+            ),
+            Self::Checked(Ok(Readiness::Ready)) => (
+                Enable,
+                "防窥模式已就绪，当前为普通模式。连接远程桌面后即可开启。".into(),
+            ),
+            Self::Checked(Ok(Readiness::RestartRequired)) => (
+                Busy,
+                "防窥模式需重启 Windows 后生效。当前仍可使用普通串流。".into(),
+            ),
+            Self::Checked(Err(e)) => (Enable, format!("点击“开启防窥模式”可重试。\r\n{e}")),
+        };
+        let _ = ui.send(Event::Privacy(control, message));
+    }
 }
 
 pub fn profile_dir(options: &Options) -> Result<PathBuf, String> {
@@ -75,12 +145,13 @@ pub fn serve(
         return Err(format!("找不到串流引擎 {}", engine.display()));
     }
     let dir = std::path::absolute(profile_dir(options)?).map_err(|e| e.to_string())?;
+    let mut setup = PrivacySetup::New;
     loop {
         if !wait_for_desktop(&dir, ui, commands)? {
             return Ok(());
         }
         let _ = ui.send(Event::Status("正在启动并验证串流引擎…".into()));
-        match run_engine(options, &engine, &dir, ui, commands)? {
+        match run_engine(options, &engine, &dir, ui, commands, &mut setup)? {
             Exit::Stop => return Ok(()),
             Exit::DesktopChanged => {}
         }
@@ -149,6 +220,7 @@ fn run_engine(
     dir: &Path,
     ui: &Sender<Event>,
     commands: &Receiver<Action>,
+    setup: &mut PrivacySetup,
 ) -> Result<Exit, String> {
     let preferred = options.port.unwrap_or(47989);
     let base = if options.port.is_some() {
@@ -165,6 +237,10 @@ fn run_engine(
     check_recovery_files(engine_dir, program_data.as_deref())?;
     let profile = Profile::prepare(dir, base)
         .map_err(|e| format!("无法打开主机配置。请确认 FlashLink 只运行了一次。\r\n{e}"))?;
+    if matches!(setup, PrivacySetup::New) {
+        setup.start();
+        setup.show(ui);
+    }
     let cert = dir.join("flashlink-cert.pem");
     let key = dir.join("flashlink-key.pem");
     let creds = Credentials::create(&profile.auth)?;
@@ -233,12 +309,32 @@ fn run_engine(
         exe: engine.to_owned(),
         address: lan_address().unwrap_or_else(|| "等待局域网连接".into()),
     });
+    setup.show(ui);
     let mut active: Option<(String, super::lan::Approval, Instant)> = None;
     let mut next_poll = Instant::now();
     let mut next_deferred = Instant::now();
     let mut failures = 0;
     let mut guard: Option<super::privacy::Guard> = None;
+    let mut guard_outcome = None;
+    let mut requested_owner: Option<[u8; 32]> = None;
     loop {
+        if let Some(owner) = setup.poll(&mut requested_owner, ui) {
+            let result =
+                privacy_owner(dir, &nearby, active.is_some()).and_then(|(current_owner, beat)| {
+                    if current_owner != owner {
+                        return Err("连接设备已变更。请重新开启防窥模式。".into());
+                    }
+                    super::privacy::Guard::start(dir, child.id(), owner, beat)
+                });
+            let event = match result {
+                Ok(g) => {
+                    guard = Some(g);
+                    Event::Privacy(PrivacyControl::Busy, "正在切换到防窥模式…".into())
+                }
+                Err(e) => Event::Privacy(PrivacyControl::Enable, e),
+            };
+            let _ = ui.send(event);
+        }
         if let Some(g) = guard.as_mut() {
             if let Some(beat) = nearby.heartbeat(&g.owner) {
                 g.beat(beat);
@@ -249,17 +345,33 @@ fn run_engine(
                 if matches!(message.as_str(), "RECOVERING" | "RESTORED") {
                     ending = true;
                 }
-                let text = match message.as_str() {
-                    "PRIVATE" => "隐私已开启，只有虚拟屏幕处于活动状态。",
-                    "VISIBLE" => "已退出隐私，原显示布局已恢复，串流继续。",
-                    "GRACE" => "连接中断，正在等待原设备重新连接…",
-                    "DISPLAY_UNSTABLE" => "显示配置不稳定，正在退出隐私并恢复实体屏。",
-                    "VISIBLE_FALLBACK" => "已自动退出隐私，实体屏已恢复，串流继续。",
-                    "RECOVERING" => "串流已结束，正在恢复实体屏。",
-                    "RESTORED" => "已恢复原显示布局。",
-                    msg => msg.strip_prefix("ERROR ").unwrap_or(msg),
+                let (control, text) = match message.as_str() {
+                    "PRIVATE" => (
+                        PrivacyControl::Disable,
+                        "防窥模式已开启，只有远程设备显示桌面。",
+                    ),
+                    "GRACE" => (PrivacyControl::Disable, "连接中断，正在等待原设备重新连接…"),
+                    "DISPLAY_UNSTABLE" => (
+                        PrivacyControl::Busy,
+                        "显示配置不稳定，正在退出防窥模式并恢复实体屏。",
+                    ),
+                    "RECOVERING" => (PrivacyControl::Busy, "串流已结束，正在恢复实体屏。"),
+                    "RESTORED" => (PrivacyControl::Busy, "已恢复原显示布局。"),
+                    msg => {
+                        guard_outcome = Some(
+                            match msg {
+                                "VISIBLE" => "已关闭防窥模式，原显示布局已恢复，串流继续。",
+                                "VISIBLE_FALLBACK" => {
+                                    "已自动关闭防窥模式，实体屏已恢复，串流继续。"
+                                }
+                                msg => msg.strip_prefix("ERROR ").unwrap_or(msg),
+                            }
+                            .to_owned(),
+                        );
+                        continue;
+                    }
                 };
-                let _ = ui.send(Event::Privacy(text.into()));
+                let _ = ui.send(Event::Privacy(control, text.into()));
             }
             let pending = dir
                 .join(super::privacy::MARKER)
@@ -273,6 +385,12 @@ fn run_engine(
             }
             if exited {
                 guard = None;
+                let _ = ui.send(Event::Privacy(
+                    PrivacyControl::Enable,
+                    guard_outcome
+                        .take()
+                        .unwrap_or_else(|| "防窥会话已结束。".into()),
+                ));
             }
         }
         if let Some(exit) = child.try_wait().map_err(|e| e.to_string())? {
@@ -290,35 +408,38 @@ fn run_engine(
             ));
         }
         match commands.recv_timeout(Duration::from_millis(150)) {
-            Ok(Action::TogglePrivacy) => {
+            Ok(Action::SetPrivacy(false)) => {
                 if let Some(g) = guard.as_mut() {
+                    let _ = ui.send(Event::Privacy(
+                        PrivacyControl::Busy,
+                        "正在恢复实体屏…".into(),
+                    ));
                     if super::lease::sole_owner(dir).ok() == Some(g.owner) {
                         g.end_by_user(dir);
                     } else {
                         g.finish(dir, "guard_owner_unavailable");
                     }
+                }
+            }
+            Ok(Action::SetPrivacy(true)) if guard.is_none() && requested_owner.is_none() => {
+                if matches!(setup, PrivacySetup::Checked(Ok(Readiness::RestartRequired))) {
+                    setup.show(ui);
+                } else if super::privacy::locked() != Some(false) {
+                    let _ = ui.send(Event::Privacy(
+                        PrivacyControl::Enable,
+                        "请先在本机解锁 Windows 后开启防窥模式。".into(),
+                    ));
                 } else {
-                    let result = (|| {
-                        if active.is_some() {
-                            return Err("请先处理待授权请求。".into());
+                    let owner =
+                        privacy_owner(dir, &nearby, active.is_some()).map(|(owner, _)| owner);
+                    match (&*setup, owner) {
+                        (PrivacySetup::Checked(Ok(Readiness::Ready)), Err(e)) => {
+                            let _ = ui.send(Event::Privacy(PrivacyControl::Enable, e));
                         }
-                        if super::privacy::reconcile_deferred_restore(dir) {
-                            return Err("正在恢复重新接入的原显示器布局，请稍后再切换隐私。".into());
-                        }
-                        let owner = super::lease::sole_owner(dir)?;
-                        let beat = nearby
-                            .heartbeat(&owner)
-                            .filter(|ts| ts.elapsed() < super::privacy_time::STALE)
-                            .ok_or("请先用已配对的最新版安卓 FlashLink 打开桌面，再开启隐私。")?;
-                        super::privacy::Guard::start(dir, child.id(), owner, beat)
-                    })();
-                    match result {
-                        Ok(g) => {
-                            guard = Some(g);
-                            let _ = ui.send(Event::Privacy("正在检查虚拟屏并切换显示…".into()));
-                        }
-                        Err(e) => {
-                            let _ = ui.send(Event::Privacy(e));
+                        (_, owner) => {
+                            requested_owner = owner.ok();
+                            setup.start();
+                            setup.show(ui);
                         }
                     }
                 }
@@ -361,6 +482,18 @@ fn run_engine(
             continue;
         }
         next_poll = Instant::now() + Duration::from_millis(650);
+        if let Some(owner) = requested_owner {
+            if nearby
+                .heartbeat(&owner)
+                .is_none_or(|beat| beat.elapsed() >= super::privacy_time::STALE)
+            {
+                requested_owner = None;
+                let _ = ui.send(Event::Privacy(
+                    PrivacyControl::Busy,
+                    "串流已中断，已取消本次开启。内置组件准备完成后可重新连接。".into(),
+                ));
+            }
+        }
         if super::privacy::locked() != Some(false) {
             if let Some(g) = guard.as_mut() {
                 g.finish(dir, "guard_desktop_unavailable");
@@ -423,6 +556,28 @@ fn run_engine(
     }
 }
 
+fn privacy_owner(
+    dir: &Path,
+    nearby: &Nearby,
+    pairing: bool,
+) -> Result<([u8; 32], Instant), String> {
+    if super::privacy::locked() != Some(false) {
+        return Err("请在当前已解锁的 Windows 桌面开启防窥模式。".into());
+    }
+    if pairing {
+        return Err("请先处理待授权请求。".into());
+    }
+    if super::privacy::reconcile_deferred_restore(dir) {
+        return Err("正在恢复原显示器布局，请稍后再开启防窥模式。".into());
+    }
+    let owner = super::lease::sole_owner(dir)?;
+    let beat = nearby
+        .heartbeat(&owner)
+        .filter(|ts| ts.elapsed() < super::privacy_time::STALE)
+        .ok_or("请先用已配对的安卓 FlashLink 打开桌面，再开启防窥模式。")?;
+    Ok((owner, beat))
+}
+
 fn log_note(path: &std::path::Path) -> String {
     use std::io::{Read, Seek, SeekFrom};
     let mut details = String::new();
@@ -447,4 +602,57 @@ fn lan_address() -> Option<String> {
     let socket = UdpSocket::bind(("0.0.0.0", 0)).ok()?;
     socket.connect(("192.0.2.1", 9)).ok()?;
     Some(socket.local_addr().ok()?.ip().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preparation_never_activates_without_a_current_request() {
+        let (ui, events) = mpsc::channel();
+        let (done, task) = mpsc::channel();
+        let mut setup = PrivacySetup::Checking(task);
+        // A second check while Windows is prompting must use the first task.
+        setup.start();
+        let mut old_request = Some([1; 32]);
+        assert_eq!(setup.poll(&mut old_request, &ui), None);
+        assert!(old_request.is_some());
+        // Both startup and a new engine after lock/unlock have no pending enable request.
+        done.send(Ok(Readiness::Ready)).unwrap();
+        assert_eq!(setup.poll(&mut None, &ui), None);
+        assert!(matches!(
+            events.try_recv(),
+            Ok(Event::Privacy(PrivacyControl::Enable, _))
+        ));
+        assert_eq!(setup.poll(&mut old_request, &ui), None);
+    }
+
+    #[test]
+    fn consent_and_restart_results_release_the_pending_request() {
+        let (ui, events) = mpsc::channel();
+        let owner = [2; 32];
+        for (outcome, can_retry) in [
+            (Err("授权已取消".into()), true),
+            (Ok(Readiness::RestartRequired), false),
+        ] {
+            let (done, task) = mpsc::channel();
+            let mut setup = PrivacySetup::Checking(task);
+            let mut request = Some(owner);
+            done.send(outcome).unwrap();
+            assert_eq!(setup.poll(&mut request, &ui), None);
+            assert_eq!(request, None);
+            let Event::Privacy(control, text) = events.recv().unwrap() else {
+                panic!("missing privacy state")
+            };
+            assert_eq!(control == PrivacyControl::Enable, can_retry);
+            assert!(text.contains(if can_retry { "重试" } else { "重启" }));
+        }
+        let (done, task) = mpsc::channel();
+        let mut retry = PrivacySetup::Checking(task);
+        let mut request = Some(owner);
+        done.send(Ok(Readiness::Ready)).unwrap();
+        assert_eq!(retry.poll(&mut request, &ui), Some(owner));
+        assert_eq!(retry.poll(&mut request, &ui), None);
+    }
 }

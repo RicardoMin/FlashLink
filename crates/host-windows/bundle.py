@@ -37,9 +37,13 @@ def main():
         args.output = ROOT / "dist" / "FlashLink-Windows-x64.zip"
     if args.output.suffix.lower() != ".zip":
         parser.error("--output must name the portable .zip archive")
+    host = args.exe.read_bytes()
     for name, digest in VDD_DIGESTS.items():
-        if hashlib.sha256((ASSETS / "mttvdd" / name).read_bytes()).hexdigest() != digest:
+        component = (ASSETS / "mttvdd" / name).read_bytes()
+        if hashlib.sha256(component).hexdigest() != digest:
             parser.error(f"Virtual display component {name} differs from release 25.7.23")
+        if component not in host:
+            parser.error(f"FlashLink.exe is missing the bundled virtual display component {name}")
     original = args.sunshine_zip.read_bytes()
     if hashlib.sha256(original).hexdigest() != DIGEST:
         parser.error("Sunshine ZIP digest differs from the pinned upstream release")
@@ -53,7 +57,7 @@ def main():
     with tempfile.TemporaryDirectory(dir=args.output.parent) as temp:
         archive = pathlib.Path(temp)/args.output.name
         with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, strict_timestamps=False) as out:
-            out.write(args.exe, "FlashLink.exe")
+            out.writestr("FlashLink.exe", host)
             out.write(ROOT/"LICENSE", "LICENSE")
             out.write(ASSETS/"NOTICE.txt", "NOTICE.txt")
             out.writestr("使用说明.txt", (ASSETS/"使用说明.txt").read_text(encoding="utf-8").replace("\n", "\r\n").encode("utf-8-sig"))
@@ -97,7 +101,7 @@ def main():
             raise ValueError("Bundled notices exceed the host's 16 MiB limit")
         footer = struct.pack("<QQ16s", len(original), len(notices), b"FLASHLINK-PACK-1")
         with application.open("wb") as f:
-            f.write(args.exe.read_bytes())
+            f.write(host)
             f.write(original)
             f.write(notices)
             f.write(footer)
