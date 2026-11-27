@@ -38,6 +38,13 @@ pub enum Readiness {
     RestartRequired,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Component {
+    Missing,
+    NeedsConfiguration,
+    Installed(Readiness),
+}
+
 pub const SETUP_ARGUMENT: &str = "--prepare-privacy-display";
 
 fn launch(window: HWND) -> io::Result<Readiness> {
@@ -433,8 +440,11 @@ fn mark_restart() -> io::Result<Readiness> {
     Ok(Readiness::RestartRequired)
 }
 
-fn usable(state: Device) -> io::Result<Option<Readiness>> {
+fn usable(state: Device, helper_ready: bool) -> io::Result<Option<Readiness>> {
     match state {
+        Device::Running | Device::Problem(CM_PROB_DISABLED) if helper_ready => {
+            Ok(Some(Readiness::Ready))
+        }
         Device::Running
             if super::privacy_display::Topology::privacy_target_available()
                 .map_err(io::Error::other)? =>
@@ -456,10 +466,10 @@ fn usable(state: Device) -> io::Result<Option<Readiness>> {
 }
 
 // PnP registration may finish before the indirect monitor is available to SetDisplayConfig.
-fn await_output(mut state: Device) -> io::Result<Readiness> {
+fn await_output(mut state: Device, helper_ready: bool) -> io::Result<Readiness> {
     let deadline = Instant::now() + Duration::from_secs(8);
     loop {
-        if let Some(ready) = usable(state)? {
+        if let Some(ready) = usable(state, helper_ready)? {
             return Ok(ready);
         }
         if Instant::now() >= deadline {
@@ -508,49 +518,75 @@ fn needs_setup(
     }
 }
 
+fn inspect() -> io::Result<Component> {
+    if restart_pending()? {
+        return Ok(Component::Installed(Readiness::RestartRequired));
+    }
+    let state = device()?;
+    if state == Device::Missing {
+        return Ok(Component::Missing);
+    }
+    let dir = component_dir()?;
+    let managed = uses_directory(&dir);
+    let helper_ready = managed && super::privacy_vdd_service::is_ready();
+    let helper_installed = managed
+        && dir
+            .join(super::privacy_vdd_protocol::HELPER_EXE_NAME)
+            .is_file();
+    let has_pending_settings = managed
+        && matches!(state, Device::Running | Device::Problem(CM_PROB_DISABLED))
+        && pending_settings(&dir)?.is_some();
+    if needs_setup(
+        state,
+        managed,
+        helper_ready,
+        helper_installed,
+        has_pending_settings,
+    ) {
+        return Ok(Component::NeedsConfiguration);
+    }
+    await_output(state, helper_ready).map(Component::Installed)
+}
+
 pub fn prepare(window: HWND) -> Result<Readiness, String> {
-    let result = (|| -> io::Result<Readiness> {
-        if restart_pending()? {
+    prepare_with(inspect, || launch(window))
+}
+
+fn prepare_with(
+    inspect: impl Fn() -> io::Result<Component>,
+    install: impl FnOnce() -> io::Result<Readiness>,
+) -> Result<Readiness, String> {
+    let before = inspect().map_err(|e| e.to_string())?;
+    if let Component::Installed(readiness) = before {
+        return Ok(readiness);
+    }
+    let result = install();
+    if matches!(result, Ok(Readiness::RestartRequired)) {
+        return Ok(Readiness::RestartRequired);
+    }
+    let after = inspect().map_err(|e| e.to_string());
+    if let Err(error) = result {
+        if matches!(after, Ok(Component::Installed(Readiness::RestartRequired))) {
             return Ok(Readiness::RestartRequired);
         }
-        let dir = component_dir()?;
-        let state = device()?;
-        let managed = uses_directory(&dir);
-        let helper_ready = managed && super::privacy_vdd_service::is_ready();
-        let helper_exe = dir.join(super::privacy_vdd_protocol::HELPER_EXE_NAME);
-        let helper_installed = managed && helper_exe.is_file();
-        let has_pending_settings = managed
-            && matches!(state, Device::Running | Device::Problem(CM_PROB_DISABLED))
-            && pending_settings(&dir)?.is_some();
-        let setup = needs_setup(
-            state,
-            managed,
-            helper_ready,
-            helper_installed,
-            has_pending_settings,
-        );
-        if !setup {
-            if helper_ready && matches!(state, Device::Running | Device::Problem(CM_PROB_DISABLED))
-            {
-                return Ok(Readiness::Ready);
-            }
-            return await_output(state);
-        }
-        if launch(window)? == Readiness::RestartRequired {
-            return Ok(Readiness::RestartRequired);
-        }
-        if uses_directory(&dir) && super::privacy_vdd_service::is_ready() {
-            return Ok(Readiness::Ready);
-        }
-        await_output(device()?)
-    })();
-    result.map_err(|e| {
-        if e.raw_os_error() == Some(ERROR_CANCELLED as i32) {
-            "Windows 管理员授权已取消。".into()
+        let reason = if error.raw_os_error() == Some(ERROR_CANCELLED as i32) {
+            "已取消管理员授权。".into()
         } else {
-            format!("防窥模式准备失败：{e}")
-        }
-    })
+            format!("安装失败：{error}。")
+        };
+        let state = match after {
+            Ok(Component::Missing) => "驱动未安装。".into(),
+            Ok(Component::NeedsConfiguration) => "组件仍需配置。".into(),
+            Ok(Component::Installed(_)) => "组件已就绪。".into(),
+            Err(e) => format!("状态检查失败：{e}"),
+        };
+        return Err(format!("{reason}{state}"));
+    }
+    match after? {
+        Component::Installed(readiness) => Ok(readiness),
+        Component::Missing => Err("安装后未检测到驱动。".into()),
+        Component::NeedsConfiguration => Err("安装后组件仍未配置完成。".into()),
+    }
 }
 
 // This elevated entry point only accepts a fixed operation and only writes bundled bytes.
@@ -575,10 +611,10 @@ fn provision() -> io::Result<Readiness> {
             if let Some(settings) = pending_settings(&dir)? {
                 write_component(&dir.join("vdd_settings.xml"), settings.as_bytes())?;
             }
-            super::privacy_vdd_service::install_or_update(&dir)?;
+            super::privacy_vdd_service::install_or_update(&dir, Readiness::Ready)?;
             return Ok(Readiness::Ready);
         }
-        _ => return await_output(state),
+        _ => return await_output(state, false),
     }
     const FILES: &[(&str, &[u8])] = &[
         ("MttVDD.inf", include_bytes!("../assets/mttvdd/MttVDD.inf")),
@@ -602,12 +638,15 @@ fn provision() -> io::Result<Readiness> {
     } else {
         register(&inf)?
     };
-    super::privacy_vdd_service::install_or_update(&dir)?;
-    if reboot {
-        mark_restart()
+    let readiness = if reboot || device()? == Device::RestartRequired {
+        mark_restart()?
     } else {
-        Ok(Readiness::Ready)
+        Readiness::Ready
+    };
+    if uses_directory(&dir) {
+        super::privacy_vdd_service::install_or_update(&dir, readiness)?;
     }
+    Ok(readiness)
 }
 
 pub fn setup_exit_code() -> i32 {
@@ -621,6 +660,82 @@ pub fn setup_exit_code() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn setup_is_requested_only_for_missing_or_incomplete_components() {
+        use Component::{Installed, Missing, NeedsConfiguration};
+        for status in [Readiness::Ready, Readiness::RestartRequired] {
+            assert_eq!(
+                prepare_with(|| Ok(Installed(status)), || panic!("unexpected UAC")).unwrap(),
+                status
+            );
+        }
+        for before in [Missing, NeedsConfiguration] {
+            let next = std::cell::Cell::new(before);
+            let after = prepare_with(
+                || Ok(next.get()),
+                || {
+                    next.set(Installed(Readiness::Ready));
+                    Ok(Readiness::Ready)
+                },
+            );
+            assert_eq!(after.unwrap(), Readiness::Ready);
+        }
+    }
+
+    #[test]
+    fn setup_reports_windows_state_after_failure_cancellation_or_success() {
+        let cancelled = prepare_with(
+            || Ok(Component::Missing),
+            || Err(io::Error::from_raw_os_error(ERROR_CANCELLED as i32)),
+        )
+        .unwrap_err();
+        assert!(cancelled.contains("已取消管理员授权") && cancelled.contains("未安装"));
+
+        let state = std::cell::Cell::new(Component::Missing);
+        let failed = prepare_with(
+            || Ok(state.get()),
+            || {
+                state.set(Component::NeedsConfiguration);
+                Err(io::Error::other("测试安装错误"))
+            },
+        )
+        .unwrap_err();
+        assert!(failed.contains("测试安装错误") && failed.contains("仍需配置"));
+
+        let reboot = Component::Installed(Readiness::RestartRequired);
+        for installer_result in [
+            Ok(Readiness::Ready),
+            Err(io::Error::other("service unavailable")),
+        ] {
+            state.set(Component::Missing);
+            assert_eq!(
+                prepare_with(
+                    || Ok(state.get()),
+                    || {
+                        state.set(reboot);
+                        installer_result
+                    }
+                )
+                .unwrap(),
+                Readiness::RestartRequired
+            );
+        }
+        assert!(prepare_with(|| Ok(Component::Missing), || Ok(Readiness::Ready)).is_err());
+    }
+
+    #[test]
+    fn healthy_helper_recognizes_standby_without_hiding_pnp_failures() {
+        assert_eq!(
+            usable(Device::Problem(CM_PROB_DISABLED), true).unwrap(),
+            Some(Readiness::Ready)
+        );
+        assert_eq!(
+            usable(Device::RestartRequired, true).unwrap(),
+            Some(Readiness::RestartRequired)
+        );
+        assert!(usable(Device::Problem(43), true).is_err());
+    }
 
     #[test]
     fn legacy_helper_test_build_triggers_upgrade_without_settings_change() {

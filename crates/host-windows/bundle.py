@@ -1,5 +1,6 @@
 """Package FlashLink.exe with the verified, offline Sunshine runtime."""
 import argparse
+from contextlib import ExitStack
 import hashlib
 import io
 import json
@@ -8,6 +9,7 @@ import shutil
 import subprocess
 import struct
 import tempfile
+import uuid
 import zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -106,19 +108,28 @@ def main():
             f.write(original)
             f.write(notices)
             f.write(footer)
+        directories = [args.output.parent]
         if update_install:
             install = ROOT / "install"
             install.mkdir(exist_ok=True)
-            # Stage both verified packages on the destination filesystem before replacing either.
-            with tempfile.TemporaryDirectory(dir=install) as staging:
+            directories.append(install)
+        # A rename on Windows retains the source DACL. Create the files directly
+        # in each publication directory so they inherit its reader permissions.
+        with ExitStack() as cleanup:
+            staged = []
+            for directory in directories:
                 for package in (application, archive):
-                    shutil.copyfile(package, pathlib.Path(staging) / package.name)
-                for package in (application, archive):
-                    (pathlib.Path(staging) / package.name).replace(install / package.name)
+                    pending = directory / f".{package.name}.{uuid.uuid4().hex}.tmp"
+                    with pending.open("xb") as writer:
+                        cleanup.callback(pending.unlink, missing_ok=True)
+                        with package.open("rb") as reader:
+                            shutil.copyfileobj(reader, writer, 1024 * 1024)
+                    staged.append((pending, directory / package.name))
+            for pending, destination in staged:
+                pending.replace(destination)
+        if update_install:
             print(f"Test downloads: {install / single.name}, {install / archive.name}")
-        application.replace(single)
         print(single, single.stat().st_size, hashlib.sha256(single.read_bytes()).hexdigest())
-        archive.replace(args.output)
     print(args.output, args.output.stat().st_size, hashlib.sha256(args.output.read_bytes()).hexdigest())
 
 
