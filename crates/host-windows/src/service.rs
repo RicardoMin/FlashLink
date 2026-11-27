@@ -55,17 +55,23 @@ pub enum PrivacyControl {
 
 // The setup worker can wait for Windows consent while discovery and pairing continue.
 // Its result survives lock/unlock; an intent to enter privacy belongs to one engine session.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SetupAction {
+    Startup,
+    Enable,
+}
+
 enum PrivacySetup {
     New,
-    Checking(Receiver<Result<Readiness, String>>),
+    Checking(SetupAction, Receiver<Result<Readiness, String>>),
     Checked(Result<Readiness, String>),
 }
 
 impl PrivacySetup {
-    fn start(&mut self) {
+    fn start(&mut self, action: SetupAction) {
         if matches!(
             self,
-            Self::Checking(_) | Self::Checked(Ok(Readiness::RestartRequired))
+            Self::Checking(..) | Self::Checked(Ok(Readiness::RestartRequired))
         ) {
             return;
         }
@@ -73,11 +79,11 @@ impl PrivacySetup {
         std::thread::spawn(move || {
             let _ = tx.send(super::privacy_driver::prepare(std::ptr::null_mut()));
         });
-        *self = Self::Checking(rx);
+        *self = Self::Checking(action, rx);
     }
 
     fn poll(&mut self, request: &mut Option<[u8; 32]>, ui: &Sender<Event>) -> Option<[u8; 32]> {
-        let Self::Checking(rx) = self else {
+        let Self::Checking(action, rx) = self else {
             return None;
         };
         let outcome = match rx.try_recv() {
@@ -85,9 +91,11 @@ impl PrivacySetup {
             Err(TryRecvError::Empty) => return None,
             Err(TryRecvError::Disconnected) => Err("准备过程意外中断。".into()),
         };
+        let may_activate =
+            *action == SetupAction::Enable && matches!(outcome, Ok(Readiness::Ready));
         *self = Self::Checked(outcome);
         let owner = request.take();
-        if owner.is_some() && matches!(self, Self::Checked(Ok(Readiness::Ready))) {
+        if may_activate && owner.is_some() {
             return owner;
         }
         self.show(ui);
@@ -97,9 +105,9 @@ impl PrivacySetup {
     fn show(&self, ui: &Sender<Event>) {
         use PrivacyControl::{Busy, Enable};
         let (control, message) = match self {
-            Self::New | Self::Checking(_) => (
+            Self::New | Self::Checking(..) => (
                 Busy,
-                "正在准备内置防窥功能。若 Windows 请求授权，请在电脑上确认。".into(),
+                "正在准备内置防窥功能。首次配置时，请在电脑上确认 Windows 管理员授权。".into(),
             ),
             Self::Checked(Ok(Readiness::Ready)) => (
                 Enable,
@@ -107,8 +115,7 @@ impl PrivacySetup {
             ),
             Self::Checked(Ok(Readiness::RestartRequired)) => (
                 Busy,
-                "Windows 要求本次安装重启一次后生效，后续日常开关无需重启。当前仍可使用普通串流。"
-                    .into(),
+                "驱动已安装，Windows 要求重启电脑。重启后可开启防窥，当前仍可普通串流。".into(),
             ),
             Self::Checked(Err(e)) => (Enable, format!("点击“开启防窥模式”可重试。\r\n{e}")),
         };
@@ -239,7 +246,7 @@ fn run_engine(
     let profile = Profile::prepare(dir, base)
         .map_err(|e| format!("无法打开主机配置。请确认 FlashLink 只运行了一次。\r\n{e}"))?;
     if matches!(setup, PrivacySetup::New) {
-        setup.start();
+        setup.start(SetupAction::Startup);
         setup.show(ui);
     }
     let cert = dir.join("flashlink-cert.pem");
@@ -440,7 +447,7 @@ fn run_engine(
                         }
                         (_, owner) => {
                             requested_owner = owner.ok();
-                            setup.start();
+                            setup.start(SetupAction::Enable);
                             setup.show(ui);
                         }
                     }
@@ -612,18 +619,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn preparation_never_activates_without_a_current_request() {
+    fn automatic_startup_setup_never_activates_privacy() {
         let (ui, events) = mpsc::channel();
         let (done, task) = mpsc::channel();
-        let mut setup = PrivacySetup::Checking(task);
-        // A second check while Windows is prompting must use the first task.
-        setup.start();
+        let mut setup = PrivacySetup::Checking(SetupAction::Startup, task);
+        // An enable request cannot start another setup while first-run provisioning is in flight.
+        setup.start(SetupAction::Enable);
         let mut old_request = Some([1; 32]);
         assert_eq!(setup.poll(&mut old_request, &ui), None);
         assert!(old_request.is_some());
-        // Both startup and a new engine after lock/unlock have no pending enable request.
+        // A startup result must never blank the screen, even with a stale request.
         done.send(Ok(Readiness::Ready)).unwrap();
-        assert_eq!(setup.poll(&mut None, &ui), None);
+        assert_eq!(setup.poll(&mut old_request, &ui), None);
         assert!(matches!(
             events.try_recv(),
             Ok(Event::Privacy(PrivacyControl::Enable, _))
@@ -640,7 +647,7 @@ mod tests {
             (Ok(Readiness::RestartRequired), false),
         ] {
             let (done, task) = mpsc::channel();
-            let mut setup = PrivacySetup::Checking(task);
+            let mut setup = PrivacySetup::Checking(SetupAction::Enable, task);
             let mut request = Some(owner);
             done.send(outcome).unwrap();
             assert_eq!(setup.poll(&mut request, &ui), None);
@@ -651,11 +658,11 @@ mod tests {
             assert_eq!(control == PrivacyControl::Enable, can_retry);
             assert!(text.contains(if can_retry { "重试" } else { "重启" }));
             if !can_retry {
-                assert!(text.contains("无需重启"));
+                assert!(text.contains("普通串流"));
             }
         }
         let (done, task) = mpsc::channel();
-        let mut retry = PrivacySetup::Checking(task);
+        let mut retry = PrivacySetup::Checking(SetupAction::Enable, task);
         let mut request = Some(owner);
         done.send(Ok(Readiness::Ready)).unwrap();
         assert_eq!(retry.poll(&mut request, &ui), Some(owner));

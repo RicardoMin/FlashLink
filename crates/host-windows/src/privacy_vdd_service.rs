@@ -704,7 +704,7 @@ fn start_service_and_wait(svc: SC_HANDLE, timeout: Duration) -> io::Result<()> {
 /// admin-protected `vdd_dir`, register/update the `FlashLinkVddHelper` service
 /// (`SERVICE_AUTO_START`), and start it so `Root\MttVDD` stays disabled outside
 /// privacy mode.
-pub fn install_or_update(vdd_dir: &Path) -> io::Result<()> {
+pub fn install_or_update(vdd_dir: &Path, readiness: privacy_driver::Readiness) -> io::Result<()> {
     let scm = ServiceHandle(unsafe {
         OpenSCManagerW(ptr::null(), ptr::null(), SC_MANAGER_ALL_ACCESS_MASK)
     });
@@ -801,6 +801,10 @@ pub fn install_or_update(vdd_dir: &Path) -> io::Result<()> {
         )
     };
 
+    // An auto-start service will see the new driver on the next boot.
+    if readiness == privacy_driver::Readiness::RestartRequired {
+        return Ok(());
+    }
     start_service_and_wait(svc.0, Duration::from_secs(10))
 }
 
