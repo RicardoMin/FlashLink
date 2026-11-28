@@ -1,0 +1,969 @@
+diff --git a/cmake/compile_definitions/common.cmake b/cmake/compile_definitions/common.cmake
+index 94fbb14..6c366ef 100644
+--- a/cmake/compile_definitions/common.cmake
++++ b/cmake/compile_definitions/common.cmake
+@@ -106,6 +106,7 @@ if(WIN32)
+     # add_nvenc_sdk_implementation: args = `target_name`, `sdk_version`, `sdk_include_dir`
+     function(add_nvenc_sdk_implementation target_name sdk_version sdk_include_dir)
+         add_library(${target_name} OBJECT ${NVENC_IMPLEMENTATION_SOURCES})
++        target_link_libraries(${target_name} PRIVATE ${Boost_LIBRARIES})
+         target_include_directories(${target_name} BEFORE PRIVATE "${sdk_include_dir}")
+         target_compile_definitions(${target_name} PRIVATE
+                 NVENC_FACTORY_SUFFIX=${sdk_version}
+diff --git a/src/globals.h b/src/globals.h
+index 2c7ee9b..4d6d0af 100644
+--- a/src/globals.h
++++ b/src/globals.h
+@@ -58,6 +58,10 @@ namespace mail {
+   MAIL(idr);  ///< IDR.
+   MAIL(invalidate_ref_frames);  ///< Invalidate ref frames.
+   MAIL(gamepad_feedback);  ///< Gamepad feedback.
++  MAIL(bitrate_request);  ///< Per-session control-to-encoder request.
++  MAIL(bitrate_result);  ///< Per-session encoder-to-control reply.
++  MAIL(framerate_request);  ///< Per-session frame-rate request.
++  MAIL(framerate_result);  ///< Per-session frame-rate acknowledgement.
+   MAIL(hdr);  ///< HDR.
+ #undef MAIL
+ 
+diff --git a/src/nvenc/nvenc_base.cpp b/src/nvenc/nvenc_base.cpp
+index d20ca83..39edfaa 100644
+--- a/src/nvenc/nvenc_base.cpp
++++ b/src/nvenc/nvenc_base.cpp
+@@ -667,6 +667,15 @@ namespace NVENC_NAMESPACE {
+       return false;
+     }
+ 
++    if (client_config.videoFormat == 0 && nvenc->nvEncReconfigureEncoder) {
++      dynamic_bitrate = get_encoder_cap(init_params.encodeGUID, NV_ENC_CAPS_SUPPORT_DYN_BITRATE_CHANGE);
++      live_config = enc_config;
++      live_init = init_params;
++      live_init.encodeConfig = &live_config;
++      live_framerate = client_config.framerate;
++      live_vbv_increase = config.vbv_percentage_increase;
++    }
++
+     auto frame_size_format = stat_trackers::two_digits_after_decimal();
+     BOOST_LOG(debug) << "NvEnc: requested encoded frame size "
+                      << frame_size_format % (client_config.bitrate / 8. / client_config.framerate) << " kB";
+@@ -677,7 +686,63 @@ namespace NVENC_NAMESPACE {
+     return true;
+   }
+ 
++  bool nvenc_base::supports_live_bitrate() const {
++    return encoder && live_init.encodeConfig && dynamic_bitrate;
++  }
++
++  bool nvenc_base::supports_live_framerate() {
++    if (!encoder || !live_init.encodeConfig) {
++      return false;
++    }
++    if (!dynamic_framerate.has_value()) {
++      // NVENC has no FPS capability bit. Probe the active hardware session at its
++      // existing (possibly fractional) rate. Each new target is validated again.
++      NV_ENC_RECONFIGURE_PARAMS probe = {.version = NV_ENC_RECONFIGURE_PARAMS_VER};
++      probe.reInitEncodeParams = live_init;
++      dynamic_framerate = !nvenc_failed(nvenc->nvEncReconfigureEncoder(encoder, &probe));
++    }
++    return *dynamic_framerate;
++  }
++
++  bool nvenc_base::set_live_bitrate(int kbps) {
++    if (!supports_live_bitrate() || kbps <= 0 || live_framerate <= 0) {
++      return false;
++    }
++    return reconfigure_rate(kbps * 1000, live_framerate, false);
++  }
++
++  bool nvenc_base::set_live_framerate(int fps) {
++    return fps > 0 && supports_live_framerate() && reconfigure_rate(live_config.rcParams.averageBitRate, fps, true);
++  }
++
++  bool nvenc_base::reconfigure_rate(uint32_t bitrate, int fps, bool change_framerate) {
++    auto candidate = live_config;
++    candidate.rcParams.averageBitRate = bitrate;
++    if (candidate.rcParams.vbvBufferSize) {
++      const auto per_frame = candidate.rcParams.averageBitRate / fps;
++      candidate.rcParams.vbvBufferSize = per_frame + uint64_t(per_frame) * std::max(0, live_vbv_increase) / 100;
++    }
++    NV_ENC_RECONFIGURE_PARAMS update = {.version = NV_ENC_RECONFIGURE_PARAMS_VER};
++    update.reInitEncodeParams = live_init;
++    if (change_framerate) {
++      update.reInitEncodeParams.frameRateNum = fps;
++      update.reInitEncodeParams.frameRateDen = 1;
++    }
++    update.reInitEncodeParams.encodeConfig = &candidate;
++    if (nvenc_failed(nvenc->nvEncReconfigureEncoder(encoder, &update))) {
++      BOOST_LOG(warning) << "NvEnc: rate reconfiguration failed: " << last_nvenc_error_string;
++      return false;
++    }
++    live_init.frameRateNum = update.reInitEncodeParams.frameRateNum;
++    live_init.frameRateDen = update.reInitEncodeParams.frameRateDen;
++    live_framerate = fps;
++    live_config = candidate;
++    return true;
++  }
++
+   void nvenc_base::destroy_encoder() {
++    dynamic_framerate.reset();
++    live_init = {};
+     if (output_bitstream) {
+       if (nvenc_failed(nvenc->nvEncDestroyBitstreamBuffer(encoder, output_bitstream))) {
+         BOOST_LOG(error) << "NvEnc: NvEncDestroyBitstreamBuffer() failed: " << last_nvenc_error_string;
+diff --git a/src/nvenc/nvenc_base.h b/src/nvenc/nvenc_base.h
+index 8f9c8b0..d1674cf 100644
+--- a/src/nvenc/nvenc_base.h
++++ b/src/nvenc/nvenc_base.h
+@@ -4,6 +4,8 @@
+  */
+ #pragma once
+ 
++#include <optional>
++
+ // local includes
+ #include "nvenc_colorspace.h"
+ #include "nvenc_config.h"
+@@ -56,6 +58,11 @@ namespace NVENC_NAMESPACE {
+      */
+     void destroy_encoder() override;
+ 
++    bool supports_live_bitrate() const override;
++    bool set_live_bitrate(int kbps) override;
++    bool supports_live_framerate() override;
++    bool set_live_framerate(int fps) override;
++
+     /**
+      * @brief Encode the next frame using platform-specific input surface.
+      * @param frame_index Frame index that uniquely identifies the frame.
+@@ -120,6 +127,14 @@ namespace NVENC_NAMESPACE {
+ 
+     const NV_ENC_DEVICE_TYPE device_type;  ///< NVENC device backend used by this encoder instance.
+ 
++    /// Keep rate-control and timing parameters coherent across alternating live updates.
++    bool reconfigure_rate(uint32_t bitrate, int fps, bool change_framerate);
++    NV_ENC_INITIALIZE_PARAMS live_init {};
++    NV_ENC_CONFIG live_config {};
++    bool dynamic_bitrate = false;
++    std::optional<bool> dynamic_framerate;  ///< Lazy capability probe scoped to this encoder.
++    int live_framerate = 0;
++    int live_vbv_increase = 0;
+     void *encoder = nullptr;  ///< Opaque NVENC encoder session handle returned by the driver.
+ 
+     struct {
+diff --git a/src/nvenc/nvenc_encoder.h b/src/nvenc/nvenc_encoder.h
+index 4c75058..03b6c62 100644
+--- a/src/nvenc/nvenc_encoder.h
++++ b/src/nvenc/nvenc_encoder.h
+@@ -53,6 +53,15 @@ namespace nvenc {
+      */
+     virtual void destroy_encoder() = 0;
+ 
++    /// Whether this active encoder can change its bitrate without restarting.
++    virtual bool supports_live_bitrate() const { return false; }
++    /// Whether the driver accepts reconfiguration of the active H.264 session.
++    virtual bool supports_live_framerate() { return false; }
++    /// Reconfigure an active H.264 encoder for a new integer rate between pictures.
++    virtual bool set_live_framerate(int) { return false; }
++    /// Called on the encode thread between pictures, with the video-only budget.
++    virtual bool set_live_bitrate(int) { return false; }
++
+     /**
+      * @brief Encode the next frame using the platform-specific input surface.
+      *
+diff --git a/src/platform/common.h b/src/platform/common.h
+index 325f913..f691d03 100644
+--- a/src/platform/common.h
++++ b/src/platform/common.h
+@@ -699,6 +699,12 @@ namespace platf {
+ 
+     display_t() noexcept = default;
+ 
++    /// Whether the capture loop can adjust its pacing without recreating the display.
++    virtual bool supports_live_framerate() const { return false; }
++
++    /// Called by the capture thread to set its next pacing interval.
++    virtual void set_capture_framerate(int, int) {}
++
+     /**
+      * @brief Capture a frame.
+      * @param push_captured_image_cb The callback that is called with captured image,
+diff --git a/src/platform/windows/display.h b/src/platform/windows/display.h
+index 514cb31..33aa041 100644
+--- a/src/platform/windows/display.h
++++ b/src/platform/windows/display.h
+@@ -310,6 +310,9 @@ namespace platf::dxgi {
+ 
+     capture_e capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) override;
+ 
++    bool supports_live_framerate() const override { return true; }
++    void set_capture_framerate(int fps, int fps_x100) override;
++
+     factory1_t factory;  ///< DXGI factory used to enumerate adapters and outputs.
+     adapter_t adapter;  ///< DXGI adapter containing the selected output.
+     output_t output;  ///< DXGI output duplicated for capture.
+@@ -322,6 +325,7 @@ namespace platf::dxgi {
+     int width_before_rotation;  ///< Width before rotation.
+     int height_before_rotation;  ///< Height before rotation.
+ 
++    bool capture_rate_changed = false;  ///< Start a new pacing group on the next iteration.
+     int client_frame_rate;  ///< Client frame rate.
+     DXGI_RATIONAL client_frame_rate_strict;  ///< Client frame rate strict.
+ 
+diff --git a/src/platform/windows/display_base.cpp b/src/platform/windows/display_base.cpp
+index 151b8a6..ec57020 100644
+--- a/src/platform/windows/display_base.cpp
++++ b/src/platform/windows/display_base.cpp
+@@ -209,6 +209,13 @@ namespace platf::dxgi {
+     release_frame();
+   }
+ 
++  void display_base_t::set_capture_framerate(int fps, int fps_x100) {
++    client_frame_rate = fps;
++    const auto rate = fps_x100 ? ::video::framerateX100_to_rational(fps_x100) : AVRational {0, 1};
++    client_frame_rate_strict = {static_cast<UINT>(rate.num), static_cast<UINT>(rate.den)};
++    capture_rate_changed = true;
++  }
++
+   capture_e display_base_t::capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) {
+     auto adjust_client_frame_rate = [&]() -> DXGI_RATIONAL {
+       // Use exactly the requested rate if the client sent an X100 value
+@@ -216,7 +223,7 @@ namespace platf::dxgi {
+         return client_frame_rate_strict;
+       }
+       // Adjust capture frame interval when display refresh rate is not integral but very close to requested fps.
+-      if (display_refresh_rate.Denominator > 1) {
++      if (display_refresh_rate.Denominator > 1 && display_refresh_rate_rounded > 0) {
+         DXGI_RATIONAL candidate = display_refresh_rate;
+         if (client_frame_rate % display_refresh_rate_rounded == 0) {
+           candidate.Numerator *= client_frame_rate / display_refresh_rate_rounded;
+@@ -260,6 +267,13 @@ namespace platf::dxgi {
+       platf::capture_e status = capture_e::ok;
+       std::shared_ptr<img_t> img_out;
+ 
++      if (capture_rate_changed) {
++        client_frame_rate_adjusted = adjust_client_frame_rate();
++        frame_pacing_group_start.reset();
++        frame_pacing_group_frames = 0;
++        capture_rate_changed = false;
++      }
++
+       // Try to continue frame pacing group, snapshot() is called with zero timeout after waiting for client frame interval
+       if (frame_pacing_group_start) {
+         const uint32_t seconds = (uint64_t) frame_pacing_group_frames * client_frame_rate_adjusted.Denominator / client_frame_rate_adjusted.Numerator;
+diff --git a/src/rtsp.cpp b/src/rtsp.cpp
+index c7135dd..ef99868 100644
+--- a/src/rtsp.cpp
++++ b/src/rtsp.cpp
+@@ -1257,23 +1257,9 @@ namespace rtsp_stream {
+     if (configuredBitrateKbps) {
+       BOOST_LOG(debug) << "Client configured bitrate is "sv << configuredBitrateKbps << " Kbps"sv;
+ 
+-      // If the FEC percentage isn't too high, adjust the configured bitrate to ensure video
+-      // traffic doesn't exceed the user's selected bitrate when the FEC shards are included.
+-      if (config::stream.fec_percentage <= 80) {
+-        configuredBitrateKbps /= 100.f / (100 - config::stream.fec_percentage);
+-      }
+-
+-      // Adjust the bitrate to account for audio traffic bandwidth usage (capped at 20% reduction).
+-      // The bitrate per channel is 256 Kbps for high quality mode and 96 Kbps for normal quality.
+-      auto audioBitrateAdjustment = (config.audio.flags[audio::config_t::HIGH_QUALITY] ? 256 : 96) * config.audio.channels;
+-      configuredBitrateKbps -= std::min((std::int64_t) audioBitrateAdjustment, configuredBitrateKbps / 5);
+-
+-      // Reduce it by another 500Kbps to account for A/V packet overhead and control data
+-      // traffic (capped at 10% reduction).
+-      configuredBitrateKbps -= std::min((std::int64_t) 500, configuredBitrateKbps / 10);
+-
+-      BOOST_LOG(debug) << "Final adjusted video encoding bitrate is "sv << configuredBitrateKbps << " Kbps"sv;
+-      config.monitor.bitrate = (int) configuredBitrateKbps;
++      config.monitor.configured_bitrate = static_cast<int>(configuredBitrateKbps);
++      config.monitor.bitrate = stream::video_bitrate_for_total(configuredBitrateKbps, config.audio);
++      BOOST_LOG(debug) << "Final adjusted video encoding bitrate is "sv << config.monitor.bitrate << " Kbps"sv;
+     }
+ 
+     if (config.monitor.videoFormat == 1 && video::active_hevc_mode == 1) {
+diff --git a/src/stream.cpp b/src/stream.cpp
+index 1291c9c..d35d110 100644
+--- a/src/stream.cpp
++++ b/src/stream.cpp
+@@ -365,6 +365,24 @@ namespace stream {
+     }
+   }
+ 
++  int video_bitrate_for_total(std::int64_t total_kbps, const audio::config_t &audio_config) {
++    // If the FEC percentage isn't too high, adjust the configured bitrate to ensure video
++    // traffic doesn't exceed the user's selected bitrate when the FEC shards are included.
++    if (config::stream.fec_percentage <= 80) {
++      total_kbps /= 100.f / (100 - config::stream.fec_percentage);
++    }
++
++    // Adjust the bitrate to account for audio traffic bandwidth usage (capped at 20% reduction).
++    // The bitrate per channel is 256 Kbps for high quality mode and 96 Kbps for normal quality.
++    auto audioBitrateAdjustment = (audio_config.flags[audio::config_t::HIGH_QUALITY] ? 256 : 96) * audio_config.channels;
++    total_kbps -= std::min((std::int64_t) audioBitrateAdjustment, total_kbps / 5);
++
++    // Reduce it by another 500Kbps to account for A/V packet overhead and control data
++    // traffic (capped at 10% reduction).
++    total_kbps -= std::min((std::int64_t) 500, total_kbps / 10);
++    return static_cast<int>(total_kbps);
++  }
++
+   /**
+    * @brief ENet control server that routes incoming control packets to stream sessions.
+    */
+@@ -483,6 +501,40 @@ namespace stream {
+     control_server_t control_server;  ///< ENet server for GameStream control packets.
+   };
+ 
++  /// At most one request per setting and per authenticated peer may be in flight.
++  template<class Request, class Result>
++  struct live_setting_channel_t {
++    safe::mail_raw_t::event_t<Request> requests;
++    safe::mail_raw_t::event_t<Result> results;
++    std::optional<std::chrono::steady_clock::time_point> deadline;
++
++    bool submit(Request request) {
++      if (deadline) {
++        return false;
++      }
++      deadline = std::chrono::steady_clock::now() + 1500ms;
++      requests->raise(request);
++      return true;
++    }
++
++    std::optional<Result> poll(std::chrono::steady_clock::time_point now) {
++      if (deadline) {
++        if (auto result = results->try_pop()) {
++          deadline.reset();
++          return result;
++        }
++        if (now >= *deadline) {
++          // Cancel only a request that the encoder hasn't claimed yet.
++          if (auto stale = requests->try_pop()) {
++            deadline.reset();
++            return Result {stale->id, video::bitrate_status_e::failed, 0};
++          }
++        }
++      }
++      return {};
++    }
++  };
++
+   /**
+    * @brief Runtime state for one audio/video streaming session.
+    */
+@@ -546,6 +598,8 @@ namespace stream {
+       net::peer_t peer;  ///< Connected ENet peer for the control channel.
+       std::uint32_t seq;  ///< Sequence number for the next encrypted control message.
+ 
++      live_setting_channel_t<video::bitrate_request_t, video::bitrate_result_t> bitrate;
++      live_setting_channel_t<video::framerate_request_t, video::framerate_result_t> framerate;
+       platf::feedback_queue_t feedback_queue;  ///< Queue of controller feedback awaiting control-channel delivery.
+       safe::mail_raw_t::event_t<video::hdr_info_t> hdr_queue;  ///< Queue of HDR metadata awaiting control-channel delivery.
+     } control;  ///< Runtime state for the encrypted GameStream control channel.
+@@ -1120,6 +1174,43 @@ namespace stream {
+     return 0;
+   }
+ 
++  // FlashLink v1 extensions are carried inside a paired peer's encrypted control stream.
++  constexpr uint16_t bitrate_request_type = 0x6A40;
++  constexpr uint16_t bitrate_result_type = 0x6A41;
++
++  constexpr uint16_t framerate_request_type = 0x6A42;
++  constexpr uint16_t framerate_result_type = 0x6A43;
++
++  /// Decode two little-endian words only from a paired peer's encrypted control stream.
++  std::optional<std::pair<uint32_t, uint32_t>> read_live_request(const session_t &session, std::string_view payload) {
++    if (session.config.controlProtocolType != 13 || session.client_cert.empty() || payload.size() != 8) {
++      return {};
++    }
++    uint32_t words[2];
++    std::memcpy(words, payload.data(), sizeof(words));
++    const auto id = util::endian::little(words[0]);
++    if (!id) {
++      return {};
++    }
++    return std::pair {id, util::endian::little(words[1])};
++  }
++
++  void send_live_result(session_t *session, uint16_t type, uint32_t id, video::bitrate_status_e status, uint32_t current) {
++    struct {
++      control_header_v2 header;
++      uint32_t id, status, value;
++    } reply {
++      {util::endian::little(type), util::endian::little(uint16_t(12))},
++      util::endian::little(id), util::endian::little(static_cast<uint32_t>(status)), util::endian::little(current)
++    };
++    static_assert(sizeof(reply) == 16);
++    std::array<uint8_t, sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(sizeof(reply)) + crypto::cipher::tag_size> encrypted;
++    auto payload = encode_control(session, util::view(reply), encrypted);
++    if (!payload.empty()) {
++      session->broadcast_ref->control_server.send(payload, session->control.peer);
++    }
++  }
++
+   /**
+    * @brief Send the selected HDR mode to the connected client over the control channel.
+    *
+@@ -1190,6 +1281,41 @@ namespace stream {
+         << "---end stats---";
+     });
+ 
++    server->map(bitrate_request_type, [](session_t *session, const std::string_view &payload) {
++      auto request = read_live_request(*session, payload);
++      if (!request) {
++        return;
++      }
++      auto [id, total] = *request;
++      if (total && (total < 500 || total > 150000)) {
++        send_live_result(session, bitrate_result_type, id, video::bitrate_status_e::invalid, 0);
++        return;
++      }
++      const int budget = video_bitrate_for_total(total, session->config.audio);
++      if (config::video.max_bitrate > 0 && budget > config::video.max_bitrate) {
++        send_live_result(session, bitrate_result_type, id, video::bitrate_status_e::invalid, 0);
++        return;
++      }
++      if (!session->control.bitrate.submit({id, total, budget})) {
++        send_live_result(session, bitrate_result_type, id, video::bitrate_status_e::failed, 0);
++      }
++    });
++
++    server->map(framerate_request_type, [](session_t *session, const std::string_view &payload) {
++      auto request = read_live_request(*session, payload);
++      if (!request) {
++        return;
++      }
++      auto [id, fps] = *request;
++      if (fps > 240) {
++        send_live_result(session, framerate_result_type, id, video::bitrate_status_e::invalid, 0);
++        return;
++      }
++      if (!session->control.framerate.submit({id, fps})) {
++        send_live_result(session, framerate_result_type, id, video::bitrate_status_e::failed, 0);
++      }
++    });
++
+     server->map(packetTypes[IDX_REQUEST_IDR_FRAME], [&](session_t *session, const std::string_view &payload) {
+       BOOST_LOG(debug) << "type [IDX_REQUEST_IDR_FRAME]"sv;
+ 
+@@ -1361,6 +1487,12 @@ namespace stream {
+               send_feedback_msg(session, *feedback_msg);
+             }
+ 
++            if (auto result = session->control.bitrate.poll(now)) {
++              send_live_result(session, bitrate_result_type, result->id, result->status, result->total_kbps);
++            }
++            if (auto result = session->control.framerate.poll(now)) {
++              send_live_result(session, framerate_result_type, result->id, result->status, result->fps);
++            }
+             auto &hdr_queue = session->control.hdr_queue;
+             while (session->control.peer && hdr_queue->peek()) {
+               auto hdr_info = hdr_queue->pop();
+@@ -2319,6 +2451,10 @@ namespace stream {
+ 
+       session->config = config;
+ 
++      session->control.bitrate.requests = mail->event<video::bitrate_request_t>(mail::bitrate_request);
++      session->control.bitrate.results = mail->event<video::bitrate_result_t>(mail::bitrate_result);
++      session->control.framerate.requests = mail->event<video::framerate_request_t>(mail::framerate_request);
++      session->control.framerate.results = mail->event<video::framerate_result_t>(mail::framerate_result);
+       session->control.connect_data = launch_session.control_connect_data;
+       session->control.feedback_queue = mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback);
+       session->control.hdr_queue = mail->event<video::hdr_info_t>(mail::hdr);
+diff --git a/src/stream.h b/src/stream.h
+index c0b0f96..418e030 100644
+--- a/src/stream.h
++++ b/src/stream.h
+@@ -41,6 +41,8 @@ namespace stream {
+     std::optional<int> gcmap;  ///< Optional game-controller mapping override from the launch request.
+   };
+ 
++  int video_bitrate_for_total(std::int64_t total_kbps, const audio::config_t &audio_config);
++
+   namespace session {
+     /**
+      * @brief Enumerates supported state options.
+diff --git a/src/video.cpp b/src/video.cpp
+index 843a19a..411139d 100644
+--- a/src/video.cpp
++++ b/src/video.cpp
+@@ -613,15 +613,102 @@ namespace video {
+       return result;
+     }
+ 
++    bitrate_status_e set_framerate(int fps) override {
++      if (!device || !device->nvenc || !device->nvenc->supports_live_framerate()) {
++        return bitrate_status_e::unsupported;
++      }
++      if (fps) {
++        if (!device->nvenc->set_live_framerate(fps)) {
++          return bitrate_status_e::failed;
++        }
++        // Send the updated H.264 timing information with the next picture.
++        request_idr_frame();
++      }
++      return bitrate_status_e::applied;
++    }
++
++    bitrate_status_e set_video_bitrate(int kbps) override {
++      if (!device || !device->nvenc || !device->nvenc->supports_live_bitrate()) {
++        return bitrate_status_e::unsupported;
++      }
++      if (kbps && !device->nvenc->set_live_bitrate(kbps)) {
++        return bitrate_status_e::failed;
++      }
++      return bitrate_status_e::applied;
++    }
++
+   private:
+     std::unique_ptr<platf::nvenc_encode_device_t> device;
+     bool force_idr = false;
+   };
+ 
++  bitrate_result_t apply_live_bitrate(encode_session_t &session, config_t &config, const bitrate_request_t &request) {
++    if (config.configured_bitrate <= 0) {
++      return {request.id, bitrate_status_e::unsupported, 0};
++    }
++    const bool change = request.total_kbps != 0 && request.total_kbps != static_cast<uint32_t>(config.configured_bitrate);
++    const auto status = session.set_video_bitrate(change ? request.video_kbps : 0);
++    if (status == bitrate_status_e::unsupported) {
++      return {request.id, status, 0};
++    }
++    if (change && status == bitrate_status_e::applied) {
++      config.bitrate = request.video_kbps;
++      config.configured_bitrate = static_cast<int>(request.total_kbps);
++      BOOST_LOG(info) << "Applied live bitrate: " << config.configured_bitrate << " Kbps total, " << config.bitrate << " Kbps video";
++    }
++    return {request.id, status, static_cast<uint32_t>(config.configured_bitrate)};
++  }
++
++  framerate_result_t apply_live_framerate(encode_session_t &session, config_t &config, bool dynamic_capture, const framerate_request_t &request) {
++    if (!dynamic_capture || config.framerate <= 0) {
++      return {request.id, bitrate_status_e::unsupported, 0};
++    }
++    const bool change = request.fps && request.fps != static_cast<uint32_t>(config.framerate);
++    const auto status = session.set_framerate(change ? static_cast<int>(request.fps) : 0);
++    if (status == bitrate_status_e::unsupported) {
++      return {request.id, status, 0};
++    }
++    if (change && status == bitrate_status_e::applied) {
++      config.framerate = static_cast<int>(request.fps);
++      config.framerateX100 = 0;  // The live request explicitly selects an integer rate.
++      BOOST_LOG(info) << "Applied live frame rate: " << config.framerate << " FPS";
++    }
++    return {request.id, status, static_cast<uint32_t>(config.framerate)};
++  }
++
++  struct live_video_control_t {
++    safe::mail_raw_t::event_t<bitrate_request_t> requests;
++    safe::mail_raw_t::event_t<bitrate_result_t> results;
++
++    safe::mail_raw_t::event_t<framerate_request_t> framerate_requests;
++    safe::mail_raw_t::event_t<framerate_result_t> framerate_results;
++
++    explicit live_video_control_t(const safe::mail_t &session_mail):
++        requests(session_mail->event<bitrate_request_t>(mail::bitrate_request)),
++        results(session_mail->event<bitrate_result_t>(mail::bitrate_result)),
++        framerate_requests(session_mail->event<framerate_request_t>(mail::framerate_request)),
++        framerate_results(session_mail->event<framerate_result_t>(mail::framerate_result)) {}
++
++    void poll(encode_session_t &session, config_t &config, std::atomic<int> *capture_rate = nullptr) {
++      if (auto request = requests->try_pop()) {
++        results->raise(apply_live_bitrate(session, config, *request));
++      }
++      if (auto request = framerate_requests->try_pop()) {
++        const int previous = config.framerate;
++        auto result = apply_live_framerate(session, config, capture_rate != nullptr, *request);
++        if (config.framerate != previous) {
++          capture_rate->store(config.framerate, std::memory_order_relaxed);
++        }
++        framerate_results->raise(result);
++      }
++    }
++  };
++
+   /**
+    * @brief Context object used while synchronizing encode sessions.
+    */
+   struct sync_session_ctx_t {
++    live_video_control_t live_control;
+     safe::signal_t *join_event;  ///< Signal raised when the capture and encode workers should join.
+     safe::mail_raw_t::event_t<bool> shutdown_event;  ///< Event raised when the stream should shut down.
+     safe::mail_raw_t::queue_t<packet_t> packets;  ///< Queue receiving encoded video packets for the stream sender.
+@@ -651,12 +738,26 @@ namespace video {
+    */
+   using encode_e = platf::capture_e;
+ 
++  bool capture_frame_due(std::optional<std::chrono::steady_clock::time_point> &next_frame, std::chrono::steady_clock::time_point now, std::chrono::nanoseconds interval, std::chrono::nanoseconds fastest) {
++    // Keep this peer's deadline even when another peer changes the shared clock.
++    // Co-paced frames tolerate capture jitter; slower peers sample nearer their deadline.
++    const auto tolerance = interval == fastest ? interval / 4 : std::min(interval / 4, std::chrono::nanoseconds(1ms));
++    if (next_frame && now + tolerance < *next_frame) {
++      return false;
++    }
++    next_frame = next_frame && now < *next_frame + interval ? *next_frame + interval : now + interval;
++    return true;
++  }
++
+   /**
+    * @brief Capture thread context shared with the encoder session.
+    */
+   struct capture_ctx_t {
+     img_event_t images;  ///< Queue of captured images waiting for encode.
+-    config_t config;  ///< Stream or encoder configuration captured for the worker.
++    config_t config;  ///< Capture-thread copy of the active rate.
++    std::shared_ptr<std::atomic<int>> live_rate;  ///< Published by this session's encoder.
++    std::chrono::nanoseconds interval;  ///< Requested cadence, including fractional startup rates.
++    std::optional<std::chrono::steady_clock::time_point> next_frame;  ///< Per-session sampling phase.
+   };
+ 
+   /**
+@@ -1701,7 +1802,37 @@ namespace video {
+     while (capture_ctx_queue->running()) {
+       bool artificial_reinit = false;
+ 
++      // Only the capture thread changes DXGI pacing. Each encoder publishes its accepted target.
++      auto capture_rate = std::pair {capture_ctxs.front().config.framerate, capture_ctxs.front().config.framerateX100};
++      const bool dynamic_capture = disp->supports_live_framerate() && encoder.name == "nvenc";
++      bool live_pacing = false;
+       auto push_captured_image_callback = [&](std::shared_ptr<platf::img_t> &&img, bool frame_captured) -> bool {
++        auto fastest = std::chrono::nanoseconds::max();
++        std::pair<int, int> fastest_rate {};
++        if (dynamic_capture) {
++          for (auto &ctx : capture_ctxs) {
++            if (!ctx.images->running()) {
++              continue;
++            }
++            const int target = ctx.live_rate->load(std::memory_order_relaxed);
++            live_pacing |= target != 0;
++            if (target && (target != ctx.config.framerate || ctx.config.framerateX100)) {
++              ctx.config.framerate = target;
++              ctx.config.framerateX100 = 0;
++              ctx.interval = capture_frame_interval(ctx.config);
++              ctx.next_frame.reset();
++            }
++            if (ctx.interval < fastest) {
++              fastest = ctx.interval;
++              fastest_rate = {ctx.config.framerate, ctx.config.framerateX100};
++            }
++          }
++          if (live_pacing && fastest_rate.first && capture_rate != fastest_rate) {
++            disp->set_capture_framerate(fastest_rate.first, fastest_rate.second);
++            capture_rate = fastest_rate;
++          }
++        }
++        const auto now = std::chrono::steady_clock::now();
+         KITTY_WHILE_LOOP(auto capture_ctx = std::begin(capture_ctxs), capture_ctx != std::end(capture_ctxs), {
+           if (!capture_ctx->images->running()) {
+             capture_ctx = capture_ctxs.erase(capture_ctx);
+@@ -1709,7 +1840,12 @@ namespace video {
+             continue;
+           }
+ 
+-          if (frame_captured) {
++          const bool sole_peer = capture_ctxs.size() == 1;
++          if (frame_captured && (!live_pacing || sole_peer || capture_frame_due(capture_ctx->next_frame, now, capture_ctx->interval, fastest))) {
++            if (live_pacing && sole_peer) {
++              // No filtering for a single stream. Remember the next deadline if a peer joins.
++              capture_ctx->next_frame = now + capture_ctx->interval;
++            }
+             capture_ctx->images->raise(img);
+           }
+ 
+@@ -2401,7 +2537,8 @@ namespace video {
+     int &frame_nr,  // Store progress of the frame number
+     safe::mail_t mail,
+     img_event_t images,
+-    config_t config,
++    std::atomic<int> &capture_rate,
++    config_t &config,
+     std::shared_ptr<platf::display_t> disp,
+     std::unique_ptr<platf::encode_device_t> encode_device,
+     safe::signal_t &reinit_event,
+@@ -2430,10 +2567,19 @@ namespace video {
+       }
+     });
+ 
+-    // set max frame time based on client-requested target framerate.
+-    double minimum_fps_target = (config::video.minimum_fps_target > 0.0) ? config::video.minimum_fps_target : (config.framerate / 2);
+-    std::chrono::duration<double, std::milli> max_frametime {1000.0 / minimum_fps_target};
+-    BOOST_LOG(info) << "Minimum FPS target set to ~"sv << minimum_fps_target << "fps ("sv << max_frametime.count() << "ms)"sv;
++    auto idle_interval = [&]() {
++      // Preserve the negotiated idle policy until this session actually changes rates.
++      const bool changed = capture_rate.load(std::memory_order_relaxed) != 0;
++      double minimum = config::video.minimum_fps_target;
++      if (minimum <= 0.0) {
++        minimum = changed ? std::max(1.0, config.framerate / 2.0) : config.framerate / 2;
++      }
++      if (changed) {
++        minimum = std::min(minimum, double(config.framerate));
++      }
++      return std::chrono::duration<double, std::milli> {1000.0 / minimum};
++    };
++    BOOST_LOG(info) << "Minimum FPS target set to ~"sv << 1000.0 / idle_interval().count() << "fps ("sv << idle_interval().count() << "ms)"sv;
+ 
+     auto shutdown_event = mail->event<bool>(mail::shutdown);
+     auto packets = mail::man->queue<packet_t>(mail::video_packets);
+@@ -2451,6 +2597,27 @@ namespace video {
+       }
+     }
+ 
++    live_video_control_t live_control {mail};
++    auto live_rate = disp->supports_live_framerate() ? &capture_rate : nullptr;
++    auto wait_for_image = [&]() {
++      using wait_time = std::chrono::duration<double, std::milli>;
++      auto remaining = idle_interval();
++      const wait_time control_interval {100ms};
++      if (live_rate && remaining > control_interval) {
++        // On a static desktop the configured repeat interval can exceed the ACK
++        // timeout. Service controls while waiting, without encoding extra duplicates.
++        const auto start = std::chrono::steady_clock::now();
++        while (remaining > control_interval) {
++          auto img = images->pop(control_interval);
++          if (img || !images->running() || shutdown_event->peek() || reinit_event.peek()) {
++            return img;
++          }
++          live_control.poll(*session, config, live_rate);
++          remaining = idle_interval() - (std::chrono::steady_clock::now() - start);
++        }
++      }
++      return images->pop(std::max(remaining, wait_time::zero()));
++    };
+     while (true) {
+       bool requested_idr_frame = false;
+ 
+@@ -2473,7 +2640,7 @@ namespace video {
+ 
+       // Encode at a minimum FPS to avoid image quality issues with static content
+       if (!requested_idr_frame || images->peek()) {
+-        if (auto img = images->pop(max_frametime)) {
++        if (auto img = wait_for_image()) {
+           frame_timestamp = img->frame_timestamp;
+           if (session->convert(*img)) {
+             BOOST_LOG(error) << "Could not convert image"sv;
+@@ -2498,6 +2665,7 @@ namespace video {
+         break;
+       }
+ 
++      live_control.poll(*session, config, live_rate);
+       if (encode(frame_nr++, *session, packets, channel_data, frame_timestamp)) {
+         BOOST_LOG(error) << "Could not encode video packet"sv;
+         return;
+@@ -2776,6 +2944,7 @@ namespace video {
+             continue;
+           }
+ 
++          ctx->live_control.poll(*pos->session, ctx->config);
+           if (ctx->idr_events->peek()) {
+             pos->session->request_idr_frame();
+             ctx->idr_events->pop();
+@@ -2890,7 +3059,8 @@ namespace video {
+       return;
+     }
+ 
+-    ref->capture_ctx_queue->raise(capture_ctx_t {images, config});
++    auto capture_rate = std::make_shared<std::atomic<int>>(0);
++    ref->capture_ctx_queue->raise(capture_ctx_t {images, config, capture_rate, config.framerate > 0 ? capture_frame_interval(config) : std::chrono::nanoseconds::max(), {}});
+ 
+     if (!ref->capture_ctx_queue->running()) {
+       return;
+@@ -2946,6 +3116,7 @@ namespace video {
+         frame_nr,
+         mail,
+         images,
++        *capture_rate,
+         config,
+         display,
+         std::move(encode_device),
+@@ -2979,6 +3150,7 @@ namespace video {
+       safe::signal_t join_event;
+       auto ref = capture_thread_sync.ref();
+       ref->encode_session_ctx_queue.raise(sync_session_ctx_t {
++        live_video_control_t {mail},
+         &join_event,
+         mail->event<bool>(mail::shutdown),
+         mail::man->queue<packet_t>(mail::video_packets),
+diff --git a/src/video.h b/src/video.h
+index 63f3cf5..fab02a7 100644
+--- a/src/video.h
++++ b/src/video.h
+@@ -39,6 +39,34 @@ namespace video {
+     int dynamicRange;  ///< Encoding color depth: 0 = 8-bit, 1 = 10-bit.
+     int chromaSamplingType;  ///< Chroma sampling type: 0 = 4:2:0, 1 = 4:4:4.
+     int enableIntraRefresh;  ///< Intra refresh setting: 0 = disabled, 1 = enabled.
++    int configured_bitrate = 0;  ///< Client's total stream bandwidth before FEC/audio deductions.
++  };
++
++  enum class bitrate_status_e : uint32_t {
++    applied = 0, unsupported = 1, invalid = 2, failed = 3
++  };
++
++  struct bitrate_request_t {
++    uint32_t id;
++    uint32_t total_kbps;  ///< Zero queries the active encoder.
++    int video_kbps;
++  };
++
++  struct bitrate_result_t {
++    uint32_t id;
++    bitrate_status_e status;
++    uint32_t total_kbps;
++  };
++
++  struct framerate_request_t {
++    uint32_t id;
++    uint32_t fps;  ///< Zero queries the active stream.
++  };
++
++  struct framerate_result_t {
++    uint32_t id;
++    bitrate_status_e status;
++    uint32_t fps;
+   };
+ 
+   namespace amf {
+@@ -424,6 +452,12 @@ namespace video {
+   struct encode_session_t {
+     virtual ~encode_session_t() = default;
+ 
++    /// Set the frame rate between pictures, or query support when fps is zero.
++    virtual bitrate_status_e set_framerate(int) { return bitrate_status_e::unsupported; }
++
++    /// Apply a video-only budget, or query support when kbps is zero.
++    virtual bitrate_status_e set_video_bitrate(int) { return bitrate_status_e::unsupported; }
++
+     /**
+      * @brief Convert a captured frame into the encoder's required input representation.
+      *
+@@ -451,6 +485,15 @@ namespace video {
+     virtual void invalidate_ref_frames(int64_t first_frame, int64_t last_frame) = 0;
+   };
+ 
++  /// Runs on the encoder thread. Only accepted targets become the configuration for its next frame/reinit.
++  bitrate_result_t apply_live_bitrate(encode_session_t &session, config_t &config, const bitrate_request_t &request);
++
++  /// Sample a lower-rate stream on a faster shared capture clock, preserving fractional phase.
++  bool capture_frame_due(std::optional<std::chrono::steady_clock::time_point> &next_frame, std::chrono::steady_clock::time_point now, std::chrono::nanoseconds interval, std::chrono::nanoseconds fastest);
++
++  /// Commit the new rate only after the active display and encoder both support it.
++  framerate_result_t apply_live_framerate(encode_session_t &session, config_t &config, bool dynamic_capture, const framerate_request_t &request);
++
+   // encoders
+   extern encoder_t software;
+ 
+diff --git a/tests/unit/test_video.cpp b/tests/unit/test_video.cpp
+index a7f0426..76f2919 100644
+--- a/tests/unit/test_video.cpp
++++ b/tests/unit/test_video.cpp
+@@ -26,6 +26,112 @@ extern "C" {
+ 
+ using namespace std::literals;
+ 
++TEST(LiveBitrateTest, CommitsOnlyChangesAcceptedByTheCurrentEncoder) {
++  struct encoder_t: video::encode_session_t {
++    video::bitrate_status_e status = video::bitrate_status_e::unsupported;
++    std::vector<int> budgets;
++    video::bitrate_status_e set_video_bitrate(int kbps) override {
++      budgets.push_back(kbps);
++      return status;
++    }
++    int convert(platf::img_t &) override { return 0; }
++    void request_idr_frame() override {}
++    void request_normal_frame() override {}
++    void invalidate_ref_frames(int64_t, int64_t) override {}
++  } encoder;
++
++  video::config_t config {};
++  config.configured_bitrate = 8000;
++  config.bitrate = 5708;
++  const auto request = [&](uint32_t total, int video_kbps) {
++    const auto result = video::apply_live_bitrate(encoder, config, {42, total, video_kbps});
++    EXPECT_EQ(42u, result.id);
++    return result;
++  };
++
++  EXPECT_EQ(request(0, 0).status, video::bitrate_status_e::unsupported);
++  encoder.status = video::bitrate_status_e::applied;
++  EXPECT_EQ(request(0, 0).total_kbps, 8000u);
++  EXPECT_EQ(request(24000, 18508).total_kbps, 24000u);
++  EXPECT_EQ(config.bitrate, 18508);
++  EXPECT_EQ(request(24000, 18508).total_kbps, 24000u);  // Retry just queries the encoder.
++  encoder.status = video::bitrate_status_e::failed;
++  auto result = request(8000, 5708);
++  EXPECT_EQ(result.status, video::bitrate_status_e::failed);
++  EXPECT_EQ(result.total_kbps, 24000u);
++  EXPECT_EQ(config.bitrate, 18508);
++  EXPECT_EQ(encoder.budgets, (std::vector<int> {0, 0, 18508, 0, 5708}));
++}
++
++TEST(LiveFramerateTest, PreservesNegotiatedTimingUntilEncoderAcceptsNewRate) {
++  struct encoder_t: video::encode_session_t {
++    video::bitrate_status_e status = video::bitrate_status_e::applied;
++    std::vector<int> rates;
++    video::bitrate_status_e set_framerate(int fps) override {
++      rates.push_back(fps);
++      return status;
++    }
++    int convert(platf::img_t &) override { return 0; }
++    void request_idr_frame() override {}
++    void request_normal_frame() override {}
++    void invalidate_ref_frames(int64_t, int64_t) override {}
++  } encoder;
++
++  video::config_t config {};
++  config.framerate = 60;
++  config.framerateX100 = 5994;
++  config.bitrate = 5708;
++  const auto request = [&](uint32_t fps, bool dynamic_capture = true) {
++    auto result = video::apply_live_framerate(encoder, config, dynamic_capture, {55, fps});
++    EXPECT_EQ(result.id, 55u);
++    return result;
++  };
++  EXPECT_EQ(request(30, false).status, video::bitrate_status_e::unsupported);
++  EXPECT_EQ(request(0).fps, 60u);
++  EXPECT_EQ(request(60).fps, 60u);
++  EXPECT_EQ(config.framerateX100, 5994);
++  encoder.status = video::bitrate_status_e::failed;
++  EXPECT_EQ(request(120).fps, 60u);
++  EXPECT_EQ(config.framerateX100, 5994);
++  encoder.status = video::bitrate_status_e::applied;
++  EXPECT_EQ(request(30).fps, 30u);
++  EXPECT_EQ(config.framerateX100, 0);
++  EXPECT_EQ(request(120).fps, 120u);
++  EXPECT_EQ(config.bitrate, 5708);
++  EXPECT_EQ(encoder.rates, (std::vector<int> {0, 0, 120, 30, 120}));
++}
++
++TEST(LiveFramerateTest, SamplesEachPeerAtItsOwnCadence) {
++  using clock = std::chrono::steady_clock;
++  const auto fastest = std::chrono::nanoseconds(1s) / 120;
++  for (int rate : {30, 60, 90, 120}) {
++    std::optional<clock::time_point> phase;
++    int frames = 0;
++    for (int i = 0; i < 120; ++i) {
++      frames += video::capture_frame_due(phase, clock::time_point {} + fastest * i, std::chrono::nanoseconds(1s) / rate, fastest);
++    }
++    EXPECT_EQ(frames, rate);
++  }
++}
++
++TEST(LiveFramerateTest, UnchangedPeerKeepsItsPhaseWhenSharedCaptureRateToggles) {
++  using clock = std::chrono::steady_clock;
++  const auto tick = std::chrono::nanoseconds(1s) / 120;
++  const auto observer_interval = std::chrono::nanoseconds(1s) / 30;
++  std::optional<clock::time_point> phase;
++  int frames = 0;
++  // The other peer switches every 50 ms. Each new capture pacing group can
++  // produce its first picture immediately, even just after the last group ended.
++  for (int i = 0; i < 120; ++i) {
++    const int capture_ticks = (i / 6) % 2 == 0 ? 2 : 4;
++    if ((i % 6) % capture_ticks == 0) {
++      const auto fastest = capture_ticks == 4 ? observer_interval : std::chrono::nanoseconds(1s) / 60;
++      frames += video::capture_frame_due(phase, clock::time_point {} + i * tick, observer_interval, fastest);
++    }
++  }
++  EXPECT_EQ(frames, 30);
++}
++
+ struct EncoderTest: PlatformTestSuite, testing::WithParamInterface<video::encoder_t *> {
+   void SetUp() override {
+     BaseTest::SetUp();

@@ -11,6 +11,14 @@ public final class FlashLinkQualityTest {
         assert !previous.equals(new FlashLinkQuality(2280, 1080, 60, 12500));
         assert !previous.equals(new FlashLinkQuality(1920, 1080, 59, 12500));
         assert previous.displayText().equals("2280 × 1080 · 59 FPS · 12.5 Mbps");
+        FlashLinkQuality frameRate = new FlashLinkQuality(2280, 1080, 30, 12500);
+        FlashLinkQuality bitrate = new FlashLinkQuality(2280, 1080, 59, 15000);
+        assert previous.canApplyLive(frameRate, false, true);
+        assert !previous.canApplyLive(frameRate, true, false);
+        assert previous.canApplyLive(bitrate, true, false);
+        assert !previous.canApplyLive(bitrate, false, true);
+        assert !previous.canApplyLive(new FlashLinkQuality(2280, 1080, 30, 15000), true, true);
+        assert !previous.canApplyLive(new FlashLinkQuality(1920, 1080, 59, 12500), true, true);
         assert FlashLinkQuality.mbps(500).equals("0.5");
         assert FlashLinkQuality.mbps(150000).equals("150");
         assert FlashLinkQuality.fromArray(null) == null;

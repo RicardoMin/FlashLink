@@ -44,7 +44,7 @@ def apply_patch(host, patch, *options):
 def prepare(output, origin):
     android_patch, bridge_patch, common_patch = [
         (ANDROID / name).read_bytes().replace(b"\r\n", b"\n") for name in
-        ("moonlight-v12.1.patch", "moonlight-live-bitrate.patch", "moonlight-common-live-bitrate.patch")]
+        ("moonlight-v12.1.patch", "moonlight-live-settings.patch", "moonlight-common-live-settings.patch")]
     suffix = hashlib.sha256(android_patch + bridge_patch + common_patch).hexdigest()[:16]
     host = output / f"moonlight-{PIN[:8]}-{suffix}"
     output.mkdir(parents=True, exist_ok=True)

@@ -1,0 +1,315 @@
+diff --git a/app/src/main/java/com/limelight/Game.java b/app/src/main/java/com/limelight/Game.java
+--- a/app/src/main/java/com/limelight/Game.java
++++ b/app/src/main/java/com/limelight/Game.java
+@@ -132,6 +132,7 @@
+     private String appName;
+     private NvApp app;
+     private float desiredRefreshRate;
++    final FlashLinkFrameRate frameRate = new FlashLinkFrameRate();
+ 
+     private InputCaptureProvider inputCaptureProvider;
+     private int modifierFlags = 0;
+@@ -388,6 +389,7 @@
+         decoderRenderer = new MediaCodecDecoderRenderer(
+                 this,
+                 prefConfig,
++                frameRate,
+                 new CrashListener() {
+                     @Override
+                     public void notifyCrash(Exception e) {
+@@ -1184,6 +1186,19 @@
+         finish();
+     }
+ 
++    // Weak-network hints and renderer statistics share this session's PreferenceConfiguration.
++    protected final void updateStreamBitrate(int kbps, boolean remember) {
++        prefConfig.bitrate = kbps;
++        if (remember) PreferenceConfiguration.saveStreamBitrate(this, kbps);
++    }
++
++    protected final void updateStreamFrameRate(int fps, boolean remember) {
++        prefConfig.fps = fps;
++        decoderRenderer.updateStreamFrameRate(fps, getWindowManager().getDefaultDisplay().getRefreshRate());
++        setSurfaceFrameRate(streamView.getHolder().getSurface(), true);
++        if (remember) PreferenceConfiguration.saveStreamFrameRate(this, fps);
++    }
++
+     private void setInputGrabState(boolean grab) {
+         // Grab/ungrab the mouse cursor
+         if (grab) {
+@@ -2646,37 +2661,25 @@
+ 
+     @Override
+     public void surfaceCreated(SurfaceHolder holder) {
+-        float desiredFrameRate;
+-
+         surfaceCreated = true;
+-
+-        // Android will pick the lowest matching refresh rate for a given frame rate value, so we want
+-        // to report the true FPS value if refresh rate reduction is enabled. We also report the true
+-        // FPS value if there's no suitable matching refresh rate. In that case, Android could try to
+-        // select a lower refresh rate that avoids uneven pull-down (ex: 30 Hz for a 60 FPS stream on
+-        // a display that maxes out at 50 Hz).
+-        if (mayReduceRefreshRate() || desiredRefreshRate < prefConfig.fps) {
+-            desiredFrameRate = prefConfig.fps;
+-        }
+-        else {
+-            // Otherwise, we will pretend that our frame rate matches the refresh rate we picked in
+-            // prepareDisplayForRendering(). This will usually be the highest refresh rate that our
+-            // frame rate evenly divides into, which ensures the lowest possible display latency.
+-            desiredFrameRate = desiredRefreshRate;
+-        }
+-
+-        // Tell the OS about our frame rate to allow it to adapt the display refresh rate appropriately
+-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+-            // We want to change frame rate even if it's not seamless, since prepareDisplayForRendering()
+-            // will not set the display mode on S+ if it only differs by the refresh rate. It depends
+-            // on us to trigger the frame rate switch here.
+-            holder.getSurface().setFrameRate(desiredFrameRate,
+-                    Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE,
+-                    Surface.CHANGE_FRAME_RATE_ALWAYS);
+-        }
+-        else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+-            holder.getSurface().setFrameRate(desiredFrameRate,
+-                    Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE);
++        setSurfaceFrameRate(holder.getSurface(), false);
++    }
++
++    private void setSurfaceFrameRate(Surface surface, boolean live) {
++        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R || !surface.isValid()) return;
++        // Keep the chosen high-refresh mode unless the pacing preference permits a lower vote.
++        float vote = FlashLinkFrameRate.surfaceVote(prefConfig.fps, desiredRefreshRate, mayReduceRefreshRate());
++        try {
++            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
++                surface.setFrameRate(vote, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE,
++                        live ? Surface.CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS : Surface.CHANGE_FRAME_RATE_ALWAYS);
++            }
++            else {
++                surface.setFrameRate(vote, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE);
++            }
++        }
++        catch (IllegalStateException released) {
++            LimeLog.warning("Display surface no longer available for a frame rate hint");
+         }
+     }
+ 
+diff --git a/app/src/main/java/com/limelight/binding/video/MediaCodecDecoderRenderer.java b/app/src/main/java/com/limelight/binding/video/MediaCodecDecoderRenderer.java
+--- a/app/src/main/java/com/limelight/binding/video/MediaCodecDecoderRenderer.java
++++ b/app/src/main/java/com/limelight/binding/video/MediaCodecDecoderRenderer.java
+@@ -14,6 +14,7 @@
+ import org.jcodec.codecs.h264.io.model.VUIParameters;
+ 
+ import com.limelight.BuildConfig;
++import com.limelight.FlashLinkFrameRate;
+ import com.limelight.LimeLog;
+ import com.limelight.R;
+ import com.limelight.nvstream.av.video.VideoDecoderRenderer;
+@@ -68,6 +69,7 @@
+     private boolean refFrameInvalidationAvc, refFrameInvalidationHevc, refFrameInvalidationAv1;
+     private byte optimalSlicesPerFrame;
+     private boolean refFrameInvalidationActive;
++    private final FlashLinkFrameRate frameRate;
+     private int initialWidth, initialHeight;
+     private int videoFormat;
+     private SurfaceHolder renderTarget;
+@@ -114,7 +116,15 @@
+ 
+     private long lastTimestampUs;
+     private int lastFrameNumber;
+-    private int refreshRate;
++    private volatile int refreshRate;
++    private volatile boolean dropLateCappedFrames;
++
++    public void updateStreamFrameRate(int fps, float displayHz) {
++        // doFrame() runs on the Choreographer thread, separately from the codec output thread.
++        refreshRate = fps;
++        dropLateCappedFrames = fps >= Math.round(displayHz);
++    }
++
+     private PreferenceConfiguration prefs;
+ 
+     private LinkedBlockingQueue<Integer> outputBufferQueue = new LinkedBlockingQueue<>();
+@@ -295,7 +305,7 @@
+         this.renderTarget = renderTarget;
+     }
+ 
+-    public MediaCodecDecoderRenderer(Activity activity, PreferenceConfiguration prefs,
++    public MediaCodecDecoderRenderer(Activity activity, PreferenceConfiguration prefs, FlashLinkFrameRate frameRate,
+                                      CrashListener crashListener, int consecutiveCrashCount,
+                                      boolean meteredData, boolean requestedHdr,
+                                      String glRenderer, PerfOverlayListener perfListener) {
+@@ -304,6 +314,7 @@
+         this.context = activity;
+         this.activity = activity;
+         this.prefs = prefs;
++        this.frameRate = frameRate;
+         this.crashListener = crashListener;
+         this.consecutiveCrashCount = consecutiveCrashCount;
+         this.glRenderer = glRenderer;
+@@ -1094,7 +1105,7 @@
+                                 }
+ 
+                                 if (prefs.framePacing == PreferenceConfiguration.FRAME_PACING_MAX_SMOOTHNESS ||
+-                                        prefs.framePacing == PreferenceConfiguration.FRAME_PACING_CAP_FPS) {
++                                        (prefs.framePacing == PreferenceConfiguration.FRAME_PACING_CAP_FPS && !dropLateCappedFrames)) {
+                                     // In max smoothness or cap FPS mode, we want to never drop frames
+                                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                                         // Use a PTS that will cause this frame to never be dropped
+@@ -1512,29 +1523,11 @@
+                 // Annex B NALUs (including NALUs with escape sequences)
+                 SeqParameterSet sps = H264Utils.readSPS(spsBuf);
+ 
+-                // Some decoders rely on H264 level to decide how many buffers are needed
+-                // Since we only need one frame buffered, we'll set the level as low as we can
+-                // for known resolution combinations. Reference frame invalidation may need
+-                // these, so leave them be for those decoders.
+-                if (!refFrameInvalidationActive) {
+-                    if (initialWidth <= 720 && initialHeight <= 480 && refreshRate <= 60) {
+-                        // Max 5 buffered frames at 720x480x60
+-                        LimeLog.info("Patching level_idc to 31");
+-                        sps.levelIdc = 31;
+-                    }
+-                    else if (initialWidth <= 1280 && initialHeight <= 720 && refreshRate <= 60) {
+-                        // Max 5 buffered frames at 1280x720x60
+-                        LimeLog.info("Patching level_idc to 32");
+-                        sps.levelIdc = 32;
+-                    }
+-                    else if (initialWidth <= 1920 && initialHeight <= 1080 && refreshRate <= 60) {
+-                        // Max 4 buffered frames at 1920x1080x64
+-                        LimeLog.info("Patching level_idc to 42");
+-                        sps.levelIdc = 42;
+-                    }
+-                    else {
+-                        // Leave the profile alone (currently 5.0)
+-                    }
++                int level = frameRate.avcLevelIdc(sps.levelIdc, initialWidth, initialHeight,
++                        refreshRate, refFrameInvalidationActive);
++                if (level != sps.levelIdc) {
++                    LimeLog.info("Patching level_idc to " + level);
++                    sps.levelIdc = level;
+                 }
+ 
+                 // TI OMAP4 requires a reference frame count of 1 to decode successfully. Exynos 4
+diff --git a/app/src/main/java/com/limelight/nvstream/NvConnectionListener.java b/app/src/main/java/com/limelight/nvstream/NvConnectionListener.java
+--- a/app/src/main/java/com/limelight/nvstream/NvConnectionListener.java
++++ b/app/src/main/java/com/limelight/nvstream/NvConnectionListener.java
+@@ -19,5 +19,7 @@
+ 
+     void setMotionEventState(short controllerNumber, byte motionType, short reportRateHz);
+ 
++    default void frameRateResult(int id, int status, int fps) {}
++    default void bitrateResult(int id, int status, int kbps) {}
+     void setControllerLED(short controllerNumber, byte r, byte g, byte b);
+ }
+diff --git a/app/src/main/java/com/limelight/nvstream/jni/MoonBridge.java b/app/src/main/java/com/limelight/nvstream/jni/MoonBridge.java
+--- a/app/src/main/java/com/limelight/nvstream/jni/MoonBridge.java
++++ b/app/src/main/java/com/limelight/nvstream/jni/MoonBridge.java
+@@ -326,6 +326,28 @@
+         }
+     }
+ 
++    public static void bridgeClBitrateResult(int id, int status, int kbps) {
++        NvConnectionListener listener = connectionListener;
++        if (listener != null) listener.bitrateResult(id, status, kbps);
++    }
++
++    // startConnection()/stopConnection() own this same monitor during native setup/teardown.
++    public static synchronized boolean requestBitrate(NvConnectionListener owner, int id, int kbps) {
++        return connectionListener == owner && sendBitrateRequest(id, kbps) == 0;
++    }
++
++    public static void bridgeClFrameRateResult(int id, int status, int fps) {
++        NvConnectionListener listener = connectionListener;
++        if (listener != null) listener.frameRateResult(id, status, fps);
++    }
++
++    public static synchronized boolean requestFrameRate(NvConnectionListener owner, int id, int fps) {
++        return connectionListener == owner && sendFrameRateRequest(id, fps) == 0;
++    }
++
++    private static native int sendFrameRateRequest(int id, int fps);
++    private static native int sendBitrateRequest(int id, int kbps);
++
+     public static void setupBridge(VideoDecoderRenderer videoRenderer, AudioRenderer audioRenderer, NvConnectionListener connectionListener) {
+         MoonBridge.videoRenderer = videoRenderer;
+         MoonBridge.audioRenderer = audioRenderer;
+diff --git a/app/src/main/java/com/limelight/preferences/PreferenceConfiguration.java b/app/src/main/java/com/limelight/preferences/PreferenceConfiguration.java
+--- a/app/src/main/java/com/limelight/preferences/PreferenceConfiguration.java
++++ b/app/src/main/java/com/limelight/preferences/PreferenceConfiguration.java
+@@ -351,6 +351,19 @@
+                 prefs.getString(FPS_PREF_STRING, DEFAULT_FPS));
+     }
+ 
++    public static void saveStreamFrameRate(Context context, int fps) {
++        PreferenceManager.getDefaultSharedPreferences(context).edit()
++                .putString(FPS_PREF_STRING, Integer.toString(fps))
++                .apply();
++    }
++
++    public static void saveStreamBitrate(Context context, int kbps) {
++        PreferenceManager.getDefaultSharedPreferences(context).edit()
++                .putInt(BITRATE_PREF_STRING, kbps)
++                .remove(BITRATE_PREF_OLD_STRING)
++                .apply();
++    }
++
+     private static FormatOption getVideoFormatValue(Context context) {
+         SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(context);
+ 
+diff --git a/app/src/main/jni/moonlight-core/callbacks.c b/app/src/main/jni/moonlight-core/callbacks.c
+--- a/app/src/main/jni/moonlight-core/callbacks.c
++++ b/app/src/main/jni/moonlight-core/callbacks.c
+@@ -37,6 +37,8 @@
+ static jmethodID BridgeClRumbleTriggersMethod;
+ static jmethodID BridgeClSetMotionEventStateMethod;
+ static jmethodID BridgeClSetControllerLEDMethod;
++static jmethodID BridgeClBitrateResultMethod;
++static jmethodID BridgeClFrameRateResultMethod;
+ static jbyteArray DecodedFrameBuffer;
+ static jshortArray DecodedAudioBuffer;
+ 
+@@ -100,6 +102,8 @@
+     BridgeClSetHdrModeMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClSetHdrMode", "(Z[B)V");
+     BridgeClRumbleTriggersMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClRumbleTriggers", "(SSS)V");
+     BridgeClSetMotionEventStateMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClSetMotionEventState", "(SBS)V");
++    BridgeClFrameRateResultMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClFrameRateResult", "(III)V");
++    BridgeClBitrateResultMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClBitrateResult", "(III)V");
+     BridgeClSetControllerLEDMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClSetControllerLED", "(SBBB)V");
+ }
+ 
+@@ -377,6 +381,26 @@
+     }
+ }
+ 
++static void BridgeClFrameRateResult(uint32_t id, uint32_t status, uint32_t fps) {
++    JNIEnv* env = GetThreadEnv();
++    (*env)->CallStaticVoidMethod(env, GlobalBridgeClass, BridgeClFrameRateResultMethod, (jint)id, (jint)status, (jint)fps);
++}
++
++JNIEXPORT jint JNICALL
++Java_com_limelight_nvstream_jni_MoonBridge_sendFrameRateRequest(JNIEnv* env, jclass clazz, jint id, jint fps) {
++    return LiSendFrameRateRequest((uint32_t)id, (uint32_t)fps);
++}
++
++static void BridgeClBitrateResult(uint32_t id, uint32_t status, uint32_t kbps) {
++    JNIEnv* env = GetThreadEnv();
++    (*env)->CallStaticVoidMethod(env, GlobalBridgeClass, BridgeClBitrateResultMethod, (jint)id, (jint)status, (jint)kbps);
++}
++
++JNIEXPORT jint JNICALL
++Java_com_limelight_nvstream_jni_MoonBridge_sendBitrateRequest(JNIEnv* env, jclass clazz, jint id, jint kbps) {
++    return LiSendBitrateRequest((uint32_t)id, (uint32_t)kbps);
++}
++
+ void BridgeClSetControllerLED(uint16_t controllerNumber, uint8_t r, uint8_t g, uint8_t b) {
+     JNIEnv* env = GetThreadEnv();
+ 
+@@ -413,6 +437,8 @@
+ };
+ 
+ static CONNECTION_LISTENER_CALLBACKS BridgeConnListenerCallbacks = {
++        .bitrateResult = BridgeClBitrateResult,
++        .frameRateResult = BridgeClFrameRateResult,
+         .stageStarting = BridgeClStageStarting,
+         .stageComplete = BridgeClStageComplete,
+         .stageFailed = BridgeClStageFailed,

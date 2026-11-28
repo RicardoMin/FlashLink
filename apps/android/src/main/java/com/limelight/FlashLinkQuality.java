@@ -28,6 +28,12 @@ final class FlashLinkQuality {
 
     int[] toArray() { return new int[] {width, height, fps, bitrateKbps}; }
 
+    boolean canApplyLive(FlashLinkQuality target, boolean bitrateSupported, boolean fpsSupported) {
+        if (target.width != width || target.height != height) return false;
+        if (target.fps == fps) return bitrateSupported || target.bitrateKbps == bitrateKbps;
+        return fpsSupported && target.bitrateKbps == bitrateKbps;
+    }
+
     String displayText() {
         return width + " × " + height + " · " + fps + " FPS · " + mbps(bitrateKbps) + " Mbps";
     }
