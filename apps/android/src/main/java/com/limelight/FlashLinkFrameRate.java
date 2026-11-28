@@ -3,13 +3,14 @@ package com.limelight;
 
 import java.util.function.BooleanSupplier;
 
-/** Frame-rate decisions shared by the display and the decoder for one stream. */
+/** Display refresh and H.264 level decisions for one stream. */
 public final class FlashLinkFrameRate {
     private volatile boolean liveChangeRequested;
 
-    boolean sendRequest(int fps, BooleanSupplier send) {
-        // A new SPS can reach the decoder before the control reply, or even before send returns.
-        if (fps > 0) liveChangeRequested = true;
+    boolean sendRequest(int requestedValue, BooleanSupplier send) {
+        // A frame rate or resolution change can deliver a new SPS before send returns.
+        // A zero value only queries the encoder and leaves the startup level in effect.
+        if (requestedValue != 0) liveChangeRequested = true;
         return send.getAsBoolean();
     }
 

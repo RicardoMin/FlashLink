@@ -37,6 +37,7 @@ public final class FlashLinkGame extends Game {
     static final String RESTORE_FAILURE = "dev.flashlink.restoreFailure";
     static final String RESTORING = "dev.flashlink.restoringQuality";
     static final String RESTORE_UNTIL = "dev.flashlink.restoreUntil";
+    private static final String RESTORE_SIZE_PREF = "dev.flashlink.restoreSizePreference";
     static final String RETRYABLE = "dev.flashlink.retryable";
     static final String LOG = "FlashLinkSession";
     private final Handler timer = new Handler();
@@ -61,23 +62,79 @@ public final class FlashLinkGame extends Game {
     private final ExecutorService settingSender = Executors.newSingleThreadExecutor();
     private final FlashLinkLiveSetting liveBitrate = newSetting(FlashLinkLiveSetting.Kind.BITRATE);
     private final FlashLinkLiveSetting liveFps = newSetting(FlashLinkLiveSetting.Kind.FRAME_RATE);
+    private final FlashLinkLiveSetting liveSize = newSetting(FlashLinkLiveSetting.Kind.RESOLUTION);
+    private final FlashLinkResolution resolution = new FlashLinkResolution(new FlashLinkResolution.Listener() {
+        @Override public boolean request(int size) {
+            setDecoderResizing(true);
+            if (!liveSize.set(size)) {
+                setDecoderResizing(false);
+                return false;
+            }
+            scheduleResolutionTimeout();
+            return true;
+        }
+
+        @Override public void finished(int size, boolean saved) {
+            setDecoderResizing(false);
+            int width = size >>> 16, height = size & 0xffff;
+            if (saved) {
+                PreferenceConfiguration.saveStreamSize(FlashLinkGame.this, width, height);
+                Log.i(LOG, "RESOLUTION_APPLIED " + width + "x" + height);
+                notifySetting("分辨率已切换至 " + width + " × " + height);
+            } else {
+                notifySetting("未应用新分辨率，继续使用原画面。");
+            }
+        }
+
+        @Override public void reconnect(int previous, boolean restorePreference) {
+            FlashLinkQuality restore = new FlashLinkQuality(previous >>> 16, previous & 0xffff,
+                    activeQuality.fps, activeQuality.bitrateKbps);
+            Intent data = new Intent(getIntent()).putExtra(PREVIOUS_QUALITY, restore.toArray())
+                    .putExtra(RESTORE_SIZE_PREF, restorePreference)
+                    .putExtra(FAILURE, "新分辨率未能显示，正在恢复上次可用画质。");
+            data.removeExtra(RESTORING);
+            handOffQuality(QUALITY_FAILED, data);
+        }
+    });
     private boolean openQualityWhenReady;
+
+    private void scheduleResolutionTimeout() {
+        int token = resolution.generation();
+        timer.postDelayed(() -> resolution.timeout(token), 6500);
+    }
 
     private FlashLinkLiveSetting newSetting(FlashLinkLiveSetting.Kind kind) {
         boolean fps = kind == FlashLinkLiveSetting.Kind.FRAME_RATE;
+        boolean size = kind == FlashLinkLiveSetting.Kind.RESOLUTION;
         return new FlashLinkLiveSetting(kind, new FlashLinkLiveSetting.Listener() {
             @Override public void send(int id, int value) {
-                FlashLinkLiveSetting setting = fps ? liveFps : liveBitrate;
+                FlashLinkLiveSetting setting = size ? liveSize : fps ? liveFps : liveBitrate;
                 settingSender.execute(() -> {
-                    boolean queued = fps ? frameRate.sendRequest(value, () -> MoonBridge.requestFrameRate(FlashLinkGame.this, id, value))
-                            : MoonBridge.requestBitrate(FlashLinkGame.this, id, value);
+                    boolean queued;
+                    if (size || fps) {
+                        queued = frameRate.sendRequest(value, () -> size
+                                ? MoonBridge.requestResolution(FlashLinkGame.this, id, value)
+                                : MoonBridge.requestFrameRate(FlashLinkGame.this, id, value));
+                    } else {
+                        queued = MoonBridge.requestBitrate(FlashLinkGame.this, id, value);
+                    }
                     if (!queued) timer.post(() -> setting.timeout(id));
                 });
                 timer.postDelayed(() -> setting.timeout(id), 2000);
             }
 
             @Override public void result(FlashLinkLiveSetting.Result result, int value) {
-                onSettingResult(fps, result, value);
+                if (size) {
+                    resolution.response(result, value);
+                    // During rollback the last visible frame can still have the old size.
+                    // Ask the renderer to report another frame even if its format is unchanged.
+                    if (resolution.pending() && result == FlashLinkLiveSetting.Result.APPLIED)
+                        confirmNextOutputAt(value);
+                } else onSettingResult(fps, result, value);
+                if (openQualityWhenReady && !waitingForSetting()) {
+                    openQualityWhenReady = false;
+                    if (foreground && !handingOff && !isFinishing() && !isDestroyed()) openQualityDialog();
+                }
             }
         });
     }
@@ -110,10 +167,10 @@ public final class FlashLinkGame extends Game {
             case CURRENT:
                 break;
         }
-        if (openQualityWhenReady && !liveBitrate.waiting() && !liveFps.waiting()) {
-            openQualityWhenReady = false;
-            if (foreground && !handingOff && !isFinishing() && !isDestroyed()) openQualityDialog();
-        }
+    }
+
+    private boolean waitingForSetting() {
+        return liveBitrate.waiting() || liveFps.waiting() || liveSize.waiting() || resolution.pending();
     }
 
     private void notifySetting(String message) {
@@ -126,14 +183,18 @@ public final class FlashLinkGame extends Game {
     @Override public void frameRateResult(int id, int status, int fps) {
         timer.post(() -> liveFps.response(id, status, fps));
     }
+    @Override public void resolutionResult(int id, int status, int size) {
+        timer.post(() -> liveSize.response(id, status, size));
+    }
 
     void showQualitySettings() {
         if (liveBitrate.state() == FlashLinkLiveSetting.State.CLOSED) return;
-        if (liveBitrate.probing() || liveFps.probing()) {
+        if (liveBitrate.probing() || liveFps.probing() || liveSize.probing()) {
             openQualityWhenReady = true;
             liveBitrate.probe();
             liveFps.probe();
-        } else if (liveBitrate.waiting() || liveFps.waiting()) {
+            liveSize.probe();
+        } else if (waitingForSetting()) {
             notifySetting("正在确认串流设置…");
         } else {
             openQualityDialog();
@@ -141,13 +202,15 @@ public final class FlashLinkGame extends Game {
     }
 
     private void openQualityDialog() {
-        new FlashLinkQualityDialog(this, activeQuality, liveBitrate.state(), liveFps.state()).show();
+        new FlashLinkQualityDialog(this, activeQuality, liveBitrate.state(), liveFps.state(), liveSize.state()).show();
     }
 
     private void closeLiveSettings() {
         openQualityWhenReady = false;
         liveBitrate.close();
         liveFps.close();
+        liveSize.close();
+        resolution.close();
         settingSender.shutdownNow();
     }
 
@@ -191,6 +254,20 @@ public final class FlashLinkGame extends Game {
         streamReady();
     }
 
+    @Override protected void onStreamSizePresented(int width, int height) {
+        if (handingOff || activeQuality == null || isFinishing()) return;
+        if (activeQuality.width != width || activeQuality.height != height) {
+            updateStreamSize(width, height);
+            activeQuality = new FlashLinkQuality(width, height, activeQuality.fps, activeQuality.bitrateKbps);
+        }
+        Log.i(LOG, "RESOLUTION_PRESENTED " + width + "x" + height);
+        resolution.presented(FlashLinkResolution.pack(width, height));
+    }
+
+    @Override protected void recoverOversizedStream(int size) {
+        resolution.inputTooSmall(size);
+    }
+
     private void streamReady() {
         if (startedAt == 0 || activeQuality == null || tools != null || handingOff || isFinishing() || isDestroyed()) return;
         if (pendingQuality != null) {
@@ -204,6 +281,10 @@ public final class FlashLinkGame extends Game {
             }
             timer.removeCallbacks(qualityTimeout);
             if (isRestoring()) {
+                if (getIntent().getBooleanExtra(RESTORE_SIZE_PREF, false)) {
+                    PreferenceConfiguration.saveStreamSize(this, activeQuality.width, activeQuality.height);
+                    getIntent().removeExtra(RESTORE_SIZE_PREF);
+                }
                 Toast.makeText(this, lastQualityFailure() + "\n已恢复上次画质。", Toast.LENGTH_LONG).show();
             } else {
                 rememberStreamQuality(activeQuality);
@@ -217,6 +298,7 @@ public final class FlashLinkGame extends Game {
         tools.attach();
         liveBitrate.probe();
         liveFps.probe();
+        liveSize.probe();
     }
 
     FlashLinkQuality currentQuality() { return activeQuality; }
@@ -225,8 +307,13 @@ public final class FlashLinkGame extends Game {
     void applyQuality(FlashLinkQuality selected, boolean reconnect) {
         if (tools == null || activeQuality == null || selected.equals(activeQuality) || handingOff) return;
         if (!reconnect) {
-            boolean queued = selected.fps != activeQuality.fps
-                    ? liveFps.set(selected.fps) : liveBitrate.set(selected.bitrateKbps);
+            boolean queued;
+            if (selected.width != activeQuality.width || selected.height != activeQuality.height) {
+                queued = resolution.begin(FlashLinkResolution.pack(activeQuality.width, activeQuality.height),
+                        FlashLinkResolution.pack(selected.width, selected.height));
+            } else {
+                queued = selected.fps != activeQuality.fps ? liveFps.set(selected.fps) : liveBitrate.set(selected.bitrateKbps);
+            }
             if (!queued) notifySetting("暂时无法切换串流设置，请重试。");
             return;
         }

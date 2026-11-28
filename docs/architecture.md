@@ -49,13 +49,15 @@ Windows 主进程提供系统托盘、逐设备撤销和报告导出。EXE 和�
 
 启用防窥后，独立 Rust 守护进程保存显示恢复信息，调用 Windows 显示配置 API，仅启用已识别的 MttVDD 虚拟输出并检查活动显示路径。安卓在原生播放器运行时通过双向 TLS 发送心跳；主机按 Sunshine 中已授权的客户端证书验证身份。心跳中断约 5 秒后进入 15 秒宽限期；期限结束后，守护进程停止串流并恢复实体屏。已授权的串流期间出现持续显示异常时，守护进程先尝试恢复原布局并继续串流，主机窗口会提示隐私已退出。主机确认恢复完成且本机已解锁后重新开启引擎与发现，沿用原配对记录。诊断文件记录这些状态的先后顺序。[显示拓扑](../crates/host-windows/src/privacy_display.rs) · [隐私守护进程](../crates/host-windows/src/privacy.rs) · [安卓心跳](../apps/android/src/main/java/com/limelight/FlashLinkPrivacyLease.java)
 
-## 会话内调整码率和帧率
+## 会话内调整串流画质
 
 首帧显示后，Android 在当前 Sunshine 会话的加密可靠 ENet 控制通道查询码率调节能力。`0x6A40` 请求携带两个小端 32 位整数，分别为非零请求编号与目标总码率（Kbps，零表示查询）。主机仅在当前使用支持动态码率的 H.264 NVENC 编码器时报告支持。调整时主机沿用建流时的纠错、音频和协议开销计算，在两帧之间调用 `NvEncReconfigureEncoder`，再通过 `0x6A41` 返回请求编号、结果和已确认的总码率。视频、音频、输入和防窥心跳继续使用原会话。
 
 帧率使用独立的请求与回执（`0x6A42`、`0x6A43`），查询格式相同，目标值用整数 FPS 表示。主机调整当前会话的编码节奏和 NVENC 的帧率参数，Windows 共享采集按活动会话所需的最快节奏运行。各会话独立限帧，桌面显示模式保持原样。Android 按主机确认的帧率更新播放器的呈现节奏。
 
-Android 分别探测两种能力，按请求编号匹配回执。设置请求超时后会查询实际值，得到确认才持久化。分辨率变化、组合调整及主机不支持的操作沿用重连和画质回滚流程。[Sunshine 补丁](../integrations/sunshine/live-settings.patch) · [Moonlight 控制通道](../apps/android/moonlight-common-live-settings.patch) · [Android 请求处理](../apps/android/src/main/java/com/limelight/FlashLinkLiveSetting.java)
+分辨率请求与回执使用 `0x6A44` 和 `0x6A45`。尺寸字段的高 16 位是宽度，低 16 位是高度，零表示查询。主机为当前会话准备目标尺寸的缩放器和编码器，在新尺寸的关键帧就绪后切换，并更新指针坐标映射。原桌面显示模式、其他客户端及音频通道继续沿用原配置。Android 使用支持自适应播放的 H.264 解码器，按解码输出更新画面布局，主机回执与新尺寸的画面均到达后才保存设置。
+
+Android 分别探测各项能力，按请求编号匹配回执。设置请求超时后会查询实际值。组合调整及当前会话不支持的操作沿用重连和画质回滚流程。[Sunshine 补丁](../integrations/sunshine/live-settings.patch) · [Moonlight 控制通道](../apps/android/moonlight-common-live-settings.patch) · [Android 请求处理](../apps/android/src/main/java/com/limelight/FlashLinkLiveSetting.java)
 
 ## 串流声音与 Windows 主音量
 
@@ -67,6 +69,6 @@ Android 分别探测两种能力，按请求编号匹配回执。设置请求超
 
 ## 构建
 
-Windows 构建脚本从 Sunshine `v2026.914.233613` 的固定提交编译带实时帧率和码率补丁的引擎。打包工具校验官方资源包和引擎构建记录，将新引擎及归档的 SHA-256 编入 Rust 主程序，再生成离线单文件 EXE 和便携 ZIP。单文件版按引擎归档摘要缓存运行时，升级后会解包对应版本。[Sunshine 构建](../crates/host-windows/build-sunshine.sh) · [Windows 打包](../crates/host-windows/bundle.py)
+Windows 构建脚本从 Sunshine `v2026.914.233613` 的固定提交编译带会话内画质调整补丁的引擎。打包工具校验官方资源包和引擎构建记录，将新引擎及归档的 SHA-256 编入 Rust 主程序，再生成离线单文件 EXE 和便携 ZIP。单文件版按引擎归档摘要缓存运行时，升级后会解包对应版本。[Sunshine 构建](../crates/host-windows/build-sunshine.sh) · [Windows 打包](../crates/host-windows/bundle.py)
 
 Android 构建脚本从固定提交的 Moonlight Android `v12.1` 应用补丁，将 Flutter AAR、Rust 动态库和 Moonlight 原生库打进同一个 APK。[Android 构建](../apps/android/build.py)

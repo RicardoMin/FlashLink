@@ -28,8 +28,9 @@ final class FlashLinkQuality {
 
     int[] toArray() { return new int[] {width, height, fps, bitrateKbps}; }
 
-    boolean canApplyLive(FlashLinkQuality target, boolean bitrateSupported, boolean fpsSupported) {
-        if (target.width != width || target.height != height) return false;
+    boolean canApplyLive(FlashLinkQuality target, boolean bitrateSupported, boolean fpsSupported, boolean sizeSupported) {
+        if (target.width != width || target.height != height)
+            return sizeSupported && target.fps == fps && target.bitrateKbps == bitrateKbps;
         if (target.fps == fps) return bitrateSupported || target.bitrateKbps == bitrateKbps;
         return fpsSupported && target.bitrateKbps == bitrateKbps;
     }

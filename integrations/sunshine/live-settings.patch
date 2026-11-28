@@ -11,10 +11,10 @@ index 94fbb14..6c366ef 100644
          target_compile_definitions(${target_name} PRIVATE
                  NVENC_FACTORY_SUFFIX=${sdk_version}
 diff --git a/src/globals.h b/src/globals.h
-index 2c7ee9b..4d6d0af 100644
+index 2c7ee9b..382dd0e 100644
 --- a/src/globals.h
 +++ b/src/globals.h
-@@ -58,6 +58,10 @@ namespace mail {
+@@ -58,6 +58,12 @@ namespace mail {
    MAIL(idr);  ///< IDR.
    MAIL(invalidate_ref_frames);  ///< Invalidate ref frames.
    MAIL(gamepad_feedback);  ///< Gamepad feedback.
@@ -22,6 +22,8 @@ index 2c7ee9b..4d6d0af 100644
 +  MAIL(bitrate_result);  ///< Per-session encoder-to-control reply.
 +  MAIL(framerate_request);  ///< Per-session frame-rate request.
 +  MAIL(framerate_result);  ///< Per-session frame-rate acknowledgement.
++  MAIL(resolution_request);  ///< Per-session resolution request.
++  MAIL(resolution_result);  ///< Per-session resolution acknowledgement.
    MAIL(hdr);  ///< HDR.
  #undef MAIL
  
@@ -281,7 +283,7 @@ index c7135dd..ef99868 100644
  
      if (config.monitor.videoFormat == 1 && video::active_hevc_mode == 1) {
 diff --git a/src/stream.cpp b/src/stream.cpp
-index 1291c9c..d35d110 100644
+index 1291c9c..81c9df9 100644
 --- a/src/stream.cpp
 +++ b/src/stream.cpp
 @@ -365,6 +365,24 @@ namespace stream {
@@ -350,16 +352,17 @@ index 1291c9c..d35d110 100644
    /**
     * @brief Runtime state for one audio/video streaming session.
     */
-@@ -546,6 +598,8 @@ namespace stream {
+@@ -546,6 +598,9 @@ namespace stream {
        net::peer_t peer;  ///< Connected ENet peer for the control channel.
        std::uint32_t seq;  ///< Sequence number for the next encrypted control message.
  
 +      live_setting_channel_t<video::bitrate_request_t, video::bitrate_result_t> bitrate;
 +      live_setting_channel_t<video::framerate_request_t, video::framerate_result_t> framerate;
++      live_setting_channel_t<video::resolution_request_t, video::resolution_result_t> resolution;
        platf::feedback_queue_t feedback_queue;  ///< Queue of controller feedback awaiting control-channel delivery.
        safe::mail_raw_t::event_t<video::hdr_info_t> hdr_queue;  ///< Queue of HDR metadata awaiting control-channel delivery.
      } control;  ///< Runtime state for the encrypted GameStream control channel.
-@@ -1120,6 +1174,43 @@ namespace stream {
+@@ -1120,6 +1175,45 @@ namespace stream {
      return 0;
    }
  
@@ -369,6 +372,8 @@ index 1291c9c..d35d110 100644
 +
 +  constexpr uint16_t framerate_request_type = 0x6A42;
 +  constexpr uint16_t framerate_result_type = 0x6A43;
++  constexpr uint16_t resolution_request_type = 0x6A44;
++  constexpr uint16_t resolution_result_type = 0x6A45;
 +
 +  /// Decode two little-endian words only from a paired peer's encrypted control stream.
 +  std::optional<std::pair<uint32_t, uint32_t>> read_live_request(const session_t &session, std::string_view payload) {
@@ -403,7 +408,7 @@ index 1291c9c..d35d110 100644
    /**
     * @brief Send the selected HDR mode to the connected client over the control channel.
     *
-@@ -1190,6 +1281,41 @@ namespace stream {
+@@ -1190,6 +1284,56 @@ namespace stream {
          << "---end stats---";
      });
  
@@ -442,10 +447,25 @@ index 1291c9c..d35d110 100644
 +      }
 +    });
 +
++    server->map(resolution_request_type, [](session_t *session, const std::string_view &payload) {
++      auto request = read_live_request(*session, payload);
++      if (!request) {
++        return;
++      }
++      auto [id, size] = *request;
++      if (size && !video::valid_live_resolution(size)) {
++        send_live_result(session, resolution_result_type, id, video::bitrate_status_e::invalid, 0);
++        return;
++      }
++      if (!session->control.resolution.submit({id, size})) {
++        send_live_result(session, resolution_result_type, id, video::bitrate_status_e::failed, 0);
++      }
++    });
++
      server->map(packetTypes[IDX_REQUEST_IDR_FRAME], [&](session_t *session, const std::string_view &payload) {
        BOOST_LOG(debug) << "type [IDX_REQUEST_IDR_FRAME]"sv;
  
-@@ -1361,6 +1487,12 @@ namespace stream {
+@@ -1361,6 +1505,15 @@ namespace stream {
                send_feedback_msg(session, *feedback_msg);
              }
  
@@ -455,17 +475,22 @@ index 1291c9c..d35d110 100644
 +            if (auto result = session->control.framerate.poll(now)) {
 +              send_live_result(session, framerate_result_type, result->id, result->status, result->fps);
 +            }
++            if (auto result = session->control.resolution.poll(now)) {
++              send_live_result(session, resolution_result_type, result->id, result->status, result->size);
++            }
              auto &hdr_queue = session->control.hdr_queue;
              while (session->control.peer && hdr_queue->peek()) {
                auto hdr_info = hdr_queue->pop();
-@@ -2319,6 +2451,10 @@ namespace stream {
+@@ -2319,6 +2472,12 @@ namespace stream {
  
        session->config = config;
  
 +      session->control.bitrate.requests = mail->event<video::bitrate_request_t>(mail::bitrate_request);
 +      session->control.bitrate.results = mail->event<video::bitrate_result_t>(mail::bitrate_result);
 +      session->control.framerate.requests = mail->event<video::framerate_request_t>(mail::framerate_request);
++      session->control.resolution.requests = mail->event<video::resolution_request_t>(mail::resolution_request);
 +      session->control.framerate.results = mail->event<video::framerate_result_t>(mail::framerate_result);
++      session->control.resolution.results = mail->event<video::resolution_result_t>(mail::resolution_result);
        session->control.connect_data = launch_session.control_connect_data;
        session->control.feedback_queue = mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback);
        session->control.hdr_queue = mail->event<video::hdr_info_t>(mail::hdr);
@@ -483,10 +508,18 @@ index c0b0f96..418e030 100644
      /**
       * @brief Enumerates supported state options.
 diff --git a/src/video.cpp b/src/video.cpp
-index 843a19a..411139d 100644
+index 843a19a..cc80472 100644
 --- a/src/video.cpp
 +++ b/src/video.cpp
-@@ -613,15 +613,102 @@ namespace video {
+@@ -7,6 +7,7 @@
+ #include <array>
+ #include <atomic>
+ #include <bitset>
++#include <future>
+ #include <list>
+ #include <thread>
+ #include <utility>
+@@ -613,15 +614,113 @@ namespace video {
        return result;
      }
  
@@ -560,11 +593,22 @@ index 843a19a..411139d 100644
 +    safe::mail_raw_t::event_t<framerate_request_t> framerate_requests;
 +    safe::mail_raw_t::event_t<framerate_result_t> framerate_results;
 +
++    safe::mail_raw_t::event_t<resolution_request_t> size_requests;
++    safe::mail_raw_t::event_t<resolution_result_t> size_results;
++
 +    explicit live_video_control_t(const safe::mail_t &session_mail):
 +        requests(session_mail->event<bitrate_request_t>(mail::bitrate_request)),
 +        results(session_mail->event<bitrate_result_t>(mail::bitrate_result)),
 +        framerate_requests(session_mail->event<framerate_request_t>(mail::framerate_request)),
-+        framerate_results(session_mail->event<framerate_result_t>(mail::framerate_result)) {}
++        framerate_results(session_mail->event<framerate_result_t>(mail::framerate_result)),
++        size_requests(session_mail->event<resolution_request_t>(mail::resolution_request)),
++        size_results(session_mail->event<resolution_result_t>(mail::resolution_result)) {}
++
++    void reject_resize() {
++      if (auto request = size_requests->try_pop()) {
++        size_results->raise(resolution_result_t {request->id, bitrate_status_e::unsupported, 0});
++      }
++    }
 +
 +    void poll(encode_session_t &session, config_t &config, std::atomic<int> *capture_rate = nullptr) {
 +      if (auto request = requests->try_pop()) {
@@ -589,7 +633,7 @@ index 843a19a..411139d 100644
      safe::signal_t *join_event;  ///< Signal raised when the capture and encode workers should join.
      safe::mail_raw_t::event_t<bool> shutdown_event;  ///< Event raised when the stream should shut down.
      safe::mail_raw_t::queue_t<packet_t> packets;  ///< Queue receiving encoded video packets for the stream sender.
-@@ -651,12 +738,26 @@ namespace video {
+@@ -651,12 +750,26 @@ namespace video {
     */
    using encode_e = platf::capture_e;
  
@@ -617,7 +661,7 @@ index 843a19a..411139d 100644
    };
  
    /**
-@@ -1701,7 +1802,37 @@ namespace video {
+@@ -1701,7 +1814,37 @@ namespace video {
      while (capture_ctx_queue->running()) {
        bool artificial_reinit = false;
  
@@ -655,7 +699,7 @@ index 843a19a..411139d 100644
          KITTY_WHILE_LOOP(auto capture_ctx = std::begin(capture_ctxs), capture_ctx != std::end(capture_ctxs), {
            if (!capture_ctx->images->running()) {
              capture_ctx = capture_ctxs.erase(capture_ctx);
-@@ -1709,7 +1840,12 @@ namespace video {
+@@ -1709,7 +1852,12 @@ namespace video {
              continue;
            }
  
@@ -669,7 +713,152 @@ index 843a19a..411139d 100644
              capture_ctx->images->raise(img);
            }
  
-@@ -2401,7 +2537,8 @@ namespace video {
+@@ -1897,6 +2045,15 @@ namespace video {
+     return 0;
+   }
+ 
++  /// Publish an encoded frame on the existing session's video transport.
++  void queue_nvenc_frame(nvenc::nvenc_encoded_frame frame, safe::mail_raw_t::queue_t<packet_t> &packets, void *channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
++    auto packet = std::make_unique<packet_raw_generic>(std::move(frame.data), frame.frame_index, frame.idr);
++    packet->channel_data = channel_data;
++    packet->after_ref_frame_invalidation = frame.after_ref_frame_invalidation;
++    packet->frame_timestamp = frame_timestamp;
++    packets->raise(std::move(packet));
++  }
++
+   /**
+    * @brief Encode one frame through NVENC and queue the resulting packet.
+    *
+@@ -1918,11 +2075,7 @@ namespace video {
+       BOOST_LOG(error) << "NvENC frame index mismatch " << frame_nr << " " << encoded_frame.frame_index;
+     }
+ 
+-    auto packet = std::make_unique<packet_raw_generic>(std::move(encoded_frame.data), encoded_frame.frame_index, encoded_frame.idr);
+-    packet->channel_data = channel_data;
+-    packet->after_ref_frame_invalidation = encoded_frame.after_ref_frame_invalidation;
+-    packet->frame_timestamp = frame_timestamp;
+-    packets->raise(std::move(packet));
++    queue_nvenc_frame(std::move(encoded_frame), packets, channel_data, frame_timestamp);
+ 
+     return 0;
+   }
+@@ -2384,6 +2537,115 @@ namespace video {
+     return nullptr;
+   }
+ 
++  input::touch_port_t make_port(platf::display_t *display, const config_t &config);
++  std::unique_ptr<platf::encode_device_t> make_encode_device(platf::display_t &disp, const encoder_t &encoder, const config_t &config);
++
++  /// Release old NVENC sessions off the encoding thread if the driver supports it.
++  /// A slow teardown must not stall the first pictures from the new encoder.
++  void retire_encoder(std::unique_ptr<encode_session_t> &session, const encoder_t &encoder) {
++    if (encoder.flags & ASYNC_TEARDOWN) {
++      try {
++        std::thread([old = std::move(session)]() mutable { old.reset(); }).detach();
++      } catch (const std::system_error &e) {
++        BOOST_LOG(warning) << "Could not offload encoder teardown: " << e.what();
++      }
++    }
++  }
++
++  /// Prepare a new scaler and encoder while the current one keeps delivering video.
++  /// The encode thread commits only after the candidate encodes a real IDR.
++  struct live_resize_t {
++    live_video_control_t &control;
++    std::future<std::unique_ptr<encode_session_t>> preparing;
++    config_t target {};
++    uint32_t id = 0;
++    std::chrono::steady_clock::time_point deadline;
++
++    explicit live_resize_t(live_video_control_t &control): control(control) {}
++
++    void finish(bitrate_status_e status, uint32_t size) {
++      control.size_results->raise(resolution_result_t {id, status, size});
++      id = 0;
++    }
++
++    ~live_resize_t() {
++      // A display reinitialization must release the claimed request, too.
++      if (id) {
++        finish(bitrate_status_e::failed, 0);
++      }
++    }
++
++    void poll(const config_t &active, const std::shared_ptr<platf::display_t> &display, const encoder_t &encoder) {
++      const auto current = pack_resolution(active.width, active.height);
++      if (id && std::chrono::steady_clock::now() >= deadline) {
++        finish(bitrate_status_e::failed, current);
++      }
++      if (auto request = control.size_requests->try_pop()) {
++        if (!request->size || request->size == current) {
++          control.size_results->raise(resolution_result_t {request->id, bitrate_status_e::applied, current});
++        } else if (preparing.valid()) {
++          control.size_results->raise(resolution_result_t {request->id, bitrate_status_e::failed, current});
++        } else {
++          target = active;
++          target.width = request->size >> 16;
++          target.height = request->size & 0xffff;
++          id = request->id;
++          deadline = std::chrono::steady_clock::now() + 1200ms;
++          try {
++            preparing = std::async(std::launch::async, [display, &encoder, config = target] {
++              auto device = make_encode_device(*display, encoder, config);
++              return make_encode_session(display.get(), encoder, config, display->width, display->height, std::move(device));
++            });
++          } catch (const std::exception &e) {
++            BOOST_LOG(warning) << "Could not prepare live resolution: " << e.what();
++            finish(bitrate_status_e::failed, current);
++          }
++        }
++      }
++    }
++
++    bool ready() const {
++      return preparing.valid() && preparing.wait_for(0ms) == std::future_status::ready;
++    }
++
++    bool commit(std::unique_ptr<encode_session_t> &session, config_t &config, platf::img_t &image, int frame_nr,
++                safe::mail_raw_t::queue_t<packet_t> &packets, void *channel_data,
++                std::optional<std::chrono::steady_clock::time_point> timestamp,
++                platf::display_t *display, safe::mail_raw_t::event_t<input::touch_port_t> &touch_port, const encoder_t &encoder) {
++      if (!ready()) {
++        return false;
++      }
++      try {
++        auto candidate = preparing.get();
++        if (!id) {
++          return false;  // Timed out. Keep the original encoder.
++        }
++        auto *next = dynamic_cast<nvenc_encode_session_t *>(candidate.get());
++        if (next && config.framerate == target.framerate && config.bitrate == target.bitrate && !next->convert(image)) {
++          next->request_idr_frame();
++          auto first = next->encode_frame(frame_nr);
++          if (first.idr && first.frame_index == uint64_t(frame_nr) && !first.data.empty()) {
++            queue_nvenc_frame(std::move(first), packets, channel_data, timestamp);
++            session.swap(candidate);
++            config.width = target.width;
++            config.height = target.height;
++            touch_port->raise(make_port(display, config));
++            finish(bitrate_status_e::applied, pack_resolution(config.width, config.height));
++            BOOST_LOG(info) << "Applied live resolution: " << config.width << 'x' << config.height;
++            retire_encoder(candidate, encoder);
++            return true;
++          }
++        }
++      } catch (const std::exception &e) {
++        BOOST_LOG(warning) << "Could not apply live resolution: " << e.what();
++      }
++      if (id) {
++        finish(bitrate_status_e::failed, pack_resolution(config.width, config.height));
++      }
++      return false;
++    }
++  };
++
+   /**
+    * @brief Run one encode loop for a display capture stream.
+    *
+@@ -2401,7 +2663,8 @@ namespace video {
      int &frame_nr,  // Store progress of the frame number
      safe::mail_t mail,
      img_event_t images,
@@ -679,8 +868,26 @@ index 843a19a..411139d 100644
      std::shared_ptr<platf::display_t> disp,
      std::unique_ptr<platf::encode_device_t> encode_device,
      safe::signal_t &reinit_event,
-@@ -2430,10 +2567,19 @@ namespace video {
-       }
+@@ -2413,44 +2676,67 @@ namespace video {
+       return;
+     }
+ 
+-    // As a workaround for NVENC hangs and to generally speed up encoder reinit,
+-    // we will complete the encoder teardown in a separate thread if supported.
+-    // This will move expensive processing off the encoder thread to allow us
+-    // to restart encoding as soon as possible. For cases where the NVENC driver
+-    // hang occurs, this thread may probably never exit, but it will allow
+-    // streaming to continue without requiring a full restart of Sunshine.
+     auto fail_guard = util::fail_guard([&encoder, &session] {
+-      if (encoder.flags & ASYNC_TEARDOWN) {
+-        std::jthread encoder_teardown_thread {[session = std::move(session)]() mutable {
+-          BOOST_LOG(info) << "Starting async encoder teardown";
+-          session.reset();
+-          BOOST_LOG(info) << "Async encoder teardown complete";
+-        }};
+-        encoder_teardown_thread.detach();
+-      }
++      retire_encoder(session, encoder);
      });
  
 -    // set max frame time based on client-requested target framerate.
@@ -703,11 +910,34 @@ index 843a19a..411139d 100644
  
      auto shutdown_event = mail->event<bool>(mail::shutdown);
      auto packets = mail::man->queue<packet_t>(mail::video_packets);
-@@ -2451,6 +2597,27 @@ namespace video {
-       }
-     }
+     auto idr_events = mail->event<bool>(mail::idr);
+     auto invalidate_ref_frames_events = mail->event<std::pair<int64_t, int64_t>>(mail::invalidate_ref_frames);
  
+-    {
+-      // Load a dummy image into the AVFrame to ensure we have something to encode
+-      // even if we timeout waiting on the first frame. This is a relatively large
+-      // allocation which can be freed immediately after convert(), so we do this
+-      // in a separate scope.
+-      auto dummy_img = disp->alloc_img();
+-      if (!dummy_img || disp->dummy_img(dummy_img.get()) || session->convert(*dummy_img)) {
+-        return;
+-      }
++    // Keep one captured texture so an idle desktop can change size immediately
++    // without sending a blank frame or waiting for the mouse to move.
++    auto last_image = disp->alloc_img();
++    if (!last_image || disp->dummy_img(last_image.get()) || session->convert(*last_image)) {
++      return;
+     }
+-
++    // The native NVENC session uses independent D3D devices for each scaler.
++    const bool can_resize = config.videoFormat == 0 &&
++                            dynamic_cast<nvenc_encode_session_t *>(session.get()) &&
++                            valid_live_resolution(pack_resolution(config.width, config.height));
++    // Never offer the startup dummy to the replacement encoder.
++    last_image.reset();
 +    live_video_control_t live_control {mail};
++    live_resize_t resize {live_control};
++    auto touch_port = mail->event<input::touch_port_t>(mail::touch_port);
 +    auto live_rate = disp->supports_live_framerate() ? &capture_rate : nullptr;
 +    auto wait_for_image = [&]() {
 +      using wait_time = std::chrono::duration<double, std::milli>;
@@ -723,6 +953,9 @@ index 843a19a..411139d 100644
 +            return img;
 +          }
 +          live_control.poll(*session, config, live_rate);
++          if (live_control.size_requests->peek() || resize.ready()) {
++            return img;
++          }
 +          remaining = idle_interval() - (std::chrono::steady_clock::now() - start);
 +        }
 +      }
@@ -731,7 +964,7 @@ index 843a19a..411139d 100644
      while (true) {
        bool requested_idr_frame = false;
  
-@@ -2473,7 +2640,7 @@ namespace video {
+@@ -2473,12 +2759,15 @@ namespace video {
  
        // Encode at a minimum FPS to avoid image quality issues with static content
        if (!requested_idr_frame || images->peek()) {
@@ -740,23 +973,46 @@ index 843a19a..411139d 100644
            frame_timestamp = img->frame_timestamp;
            if (session->convert(*img)) {
              BOOST_LOG(error) << "Could not convert image"sv;
-@@ -2498,6 +2665,7 @@ namespace video {
+             return;
+           }
++          if (can_resize) {
++            last_image = std::move(img);
++          }
+         } else if (!images->running()) {
+           break;
+         }
+@@ -2498,11 +2787,20 @@ namespace video {
          break;
        }
  
+-      if (encode(frame_nr++, *session, packets, channel_data, frame_timestamp)) {
 +      live_control.poll(*session, config, live_rate);
-       if (encode(frame_nr++, *session, packets, channel_data, frame_timestamp)) {
++      bool resized = false;
++      if (can_resize) {
++        resize.poll(config, disp, encoder);
++        resized = last_image && resize.commit(session, config, *last_image, frame_nr, packets, channel_data, frame_timestamp, disp.get(), touch_port, encoder);
++      } else {
++        live_control.reject_resize();
++      }
++      if (!resized && encode(frame_nr, *session, packets, channel_data, frame_timestamp)) {
          BOOST_LOG(error) << "Could not encode video packet"sv;
          return;
-@@ -2776,6 +2944,7 @@ namespace video {
+       }
+ 
++      ++frame_nr;
+       session->request_normal_frame();
+ 
+       // While streaming check to see if the mouse is present and enable Mouse Keys to force the cursor to appear
+@@ -2776,6 +3074,8 @@ namespace video {
              continue;
            }
  
 +          ctx->live_control.poll(*pos->session, ctx->config);
++          ctx->live_control.reject_resize();
            if (ctx->idr_events->peek()) {
              pos->session->request_idr_frame();
              ctx->idr_events->pop();
-@@ -2890,7 +3059,8 @@ namespace video {
+@@ -2890,7 +3190,8 @@ namespace video {
        return;
      }
  
@@ -766,7 +1022,7 @@ index 843a19a..411139d 100644
  
      if (!ref->capture_ctx_queue->running()) {
        return;
-@@ -2946,6 +3116,7 @@ namespace video {
+@@ -2946,6 +3247,7 @@ namespace video {
          frame_nr,
          mail,
          images,
@@ -774,7 +1030,7 @@ index 843a19a..411139d 100644
          config,
          display,
          std::move(encode_device),
-@@ -2979,6 +3150,7 @@ namespace video {
+@@ -2979,6 +3281,7 @@ namespace video {
        safe::signal_t join_event;
        auto ref = capture_thread_sync.ref();
        ref->encode_session_ctx_queue.raise(sync_session_ctx_t {
@@ -783,16 +1039,16 @@ index 843a19a..411139d 100644
          mail->event<bool>(mail::shutdown),
          mail::man->queue<packet_t>(mail::video_packets),
 diff --git a/src/video.h b/src/video.h
-index 63f3cf5..fab02a7 100644
+index 63f3cf5..72ebcad 100644
 --- a/src/video.h
 +++ b/src/video.h
-@@ -39,6 +39,34 @@ namespace video {
+@@ -39,8 +39,60 @@ namespace video {
      int dynamicRange;  ///< Encoding color depth: 0 = 8-bit, 1 = 10-bit.
      int chromaSamplingType;  ///< Chroma sampling type: 0 = 4:2:0, 1 = 4:4:4.
      int enableIntraRefresh;  ///< Intra refresh setting: 0 = disabled, 1 = enabled.
 +    int configured_bitrate = 0;  ///< Client's total stream bandwidth before FEC/audio deductions.
-+  };
-+
+   };
+ 
 +  enum class bitrate_status_e : uint32_t {
 +    applied = 0, unsupported = 1, invalid = 2, failed = 3
 +  };
@@ -818,10 +1074,36 @@ index 63f3cf5..fab02a7 100644
 +    uint32_t id;
 +    bitrate_status_e status;
 +    uint32_t fps;
-   };
- 
++  };
++
++  struct resolution_request_t {
++    uint32_t id;
++    uint32_t size;  ///< Zero queries the active stream.
++  };
++
++  struct resolution_result_t {
++    uint32_t id;
++    bitrate_status_e status;
++    uint32_t size;
++  };
++
++  /// Pack two positive dimensions into the paired live-resolution control word.
++  constexpr uint32_t pack_resolution(int width, int height) {
++    return (uint32_t(width) << 16) | uint32_t(height);
++  }
++
++  /// Bound replacement encoder allocations to DCI 4K and even H.264 dimensions.
++  constexpr bool valid_live_resolution(uint32_t size) {
++    const auto width = size >> 16;
++    const auto height = size & 0xffff;
++    return width >= 64 && width <= 4096 && height >= 64 && height <= 4096 &&
++           ((width | height) & 1) == 0 && width * height <= 4096 * 2160;
++  }
++
    namespace amf {
-@@ -424,6 +452,12 @@ namespace video {
+ 
+     /**
+@@ -424,6 +476,12 @@ namespace video {
    struct encode_session_t {
      virtual ~encode_session_t() = default;
  
@@ -834,7 +1116,7 @@ index 63f3cf5..fab02a7 100644
      /**
       * @brief Convert a captured frame into the encoder's required input representation.
       *
-@@ -451,6 +485,15 @@ namespace video {
+@@ -451,6 +509,15 @@ namespace video {
      virtual void invalidate_ref_frames(int64_t first_frame, int64_t last_frame) = 0;
    };
  
@@ -851,13 +1133,22 @@ index 63f3cf5..fab02a7 100644
    extern encoder_t software;
  
 diff --git a/tests/unit/test_video.cpp b/tests/unit/test_video.cpp
-index a7f0426..76f2919 100644
+index a7f0426..ac8dcf4 100644
 --- a/tests/unit/test_video.cpp
 +++ b/tests/unit/test_video.cpp
-@@ -26,6 +26,112 @@ extern "C" {
+@@ -26,6 +26,121 @@ extern "C" {
  
  using namespace std::literals;
  
++TEST(LiveResolutionTest, RequiresEvenDimensionsWithinTheEncoderBudget) {
++  EXPECT_TRUE(video::valid_live_resolution(video::pack_resolution(2560, 1440)));
++  EXPECT_TRUE(video::valid_live_resolution(video::pack_resolution(2160, 4096)));
++  EXPECT_FALSE(video::valid_live_resolution(0));
++  EXPECT_FALSE(video::valid_live_resolution(video::pack_resolution(1921, 1080)));
++  EXPECT_FALSE(video::valid_live_resolution(video::pack_resolution(4096, 4096)));
++  EXPECT_FALSE(video::valid_live_resolution(video::pack_resolution(8192, 64)));
++}
++
 +TEST(LiveBitrateTest, CommitsOnlyChangesAcceptedByTheCurrentEncoder) {
 +  struct encoder_t: video::encode_session_t {
 +    video::bitrate_status_e status = video::bitrate_status_e::unsupported;

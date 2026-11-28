@@ -142,6 +142,7 @@ def development():
                                  ("android_audio", "FlashLinkAudioControl"),
                                  ("android_live_setting", "FlashLinkLiveSetting"),
                                  ("android_frame_rate", "FlashLinkFrameRate"),
+                                 ("android_resolution", "FlashLinkResolution"),
                                  ("android_quality", "FlashLinkQuality")):
             compile_check = check_name + "_compile"
             check(compile_check, [jdk_tool("javac"), "-sourcepath", android / "main/java", "-d", java_classes,
