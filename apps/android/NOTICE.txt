@@ -23,6 +23,8 @@ input preference to support switching between direct touch and trackpad during a
 stream quality and confirm the new settings when the first decoded frame reaches the surface.
 2026-11-25: expose audio routing in stream settings and keep the Android audio track
 active while its output is muted for computer-only playback.
-This integration is built by apps/android/build.py and apps/android/moonlight-v12.1.patch.
+2026-11-28: add in-session bitrate requests and acknowledgements to the Android
+bridge and the pinned moonlight-common-c encrypted control stream.
+The integration patches and their build script are under apps/android/.
 Distributors of the combined APK should provide the complete corresponding source
 and build scripts for the exact binary with the distribution.

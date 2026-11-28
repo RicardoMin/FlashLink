@@ -4,6 +4,7 @@ from contextlib import ExitStack
 import hashlib
 import io
 import json
+import os
 import pathlib
 import shutil
 import subprocess
@@ -15,6 +16,8 @@ import zipfile
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 ASSETS = pathlib.Path(__file__).resolve().parent / "assets"
 DIGEST = "233008e46f4c0e501a586cbfd6c4fd4a4c0d414a0b5fc7f13c070eb92ec3824b"
+ENGINE_COMMIT = "63d35f702ee9e362e43263742981836ec0710384"
+ENGINE_PATCH = ROOT / "integrations/sunshine/live-bitrate.patch"
 VDD_DIGESTS = {
     "MttVDD.inf": "550d211fe481e74dfe3f9d724ed78be48b3a9113405965d683d9373e8d672f5d",
     "MttVDD.dll": "c9ca837f57a98fbd43bc416a7f535a95843626e7759eaf85cf0cd7ce334dbb05",
@@ -23,9 +26,46 @@ VDD_DIGESTS = {
 }
 
 
+def build_patched_host(original, engine_dir, target):
+    # Keep the pinned runtime assets and replace only the executable. The build
+    # script records exactly which source revision and patch produced it.
+    binary = (engine_dir / "sunshine.exe").read_bytes()
+    exe_hash = hashlib.sha256(binary).hexdigest()
+    patch_hash = hashlib.sha256(ENGINE_PATCH.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+    if (engine_dir / "flashlink-engine.txt").read_text().split() != [ENGINE_COMMIT, patch_hash, exe_hash]:
+        raise ValueError("Sunshine build does not match the current FlashLink patch. Rebuild the engine.")
+    output = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(original)) as base, zipfile.ZipFile(output, "w") as engine:
+        exe_path = "Sunshine/sunshine.exe"
+        base.getinfo(exe_path)
+        for item in base.infolist():
+            data = binary if item.filename == exe_path else base.read(item)
+            engine.writestr(item, data)
+        info = zipfile.ZipInfo("Sunshine/flashlink-live-bitrate.patch", base.getinfo(exe_path).date_time)
+        engine.writestr(info, ENGINE_PATCH.read_bytes().replace(b"\r\n", b"\n"), zipfile.ZIP_DEFLATED)
+    archive = output.getvalue()
+    zip_hash = hashlib.sha256(archive).hexdigest()
+    env = {**os.environ, "FLASHLINK_ENGINE_EXE_SHA256": exe_hash,
+           "FLASHLINK_ENGINE_ZIP_SHA256": zip_hash, "FLASHLINK_ENGINE_ZIP_SIZE": str(len(archive))}
+    build = subprocess.check_output(
+        ["cargo", "build", "--locked", "--release", "--target", target, "-p", "flashlink-host",
+         "--message-format=json-render-diagnostics"], cwd=ROOT, env=env, encoding="utf-8")
+    for line in build.splitlines():
+        message = json.loads(line)
+        if message.get("executable") and message["target"]["name"] == "flashlink-host":
+            host = pathlib.Path(message["executable"]).read_bytes()
+            if zip_hash.encode() not in host or exe_hash.encode() not in host:
+                raise ValueError("Host does not contain the expected engine digests")
+            return archive, host
+    raise ValueError("Cargo did not report the Windows host executable")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--exe", type=pathlib.Path, required=True)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--engine-dir", type=pathlib.Path,
+                      help="Output of build-sunshine.sh. Builds the matching Rust host for distribution.")
+    mode.add_argument("--exe", type=pathlib.Path, help="Existing host for the original, unmodified upstream runtime.")
     parser.add_argument("--sunshine-zip", type=pathlib.Path, required=True)
     parser.add_argument("--sunshine-license", type=pathlib.Path, required=True)
     parser.add_argument("--target", default="x86_64-pc-windows-msvc")
@@ -39,16 +79,21 @@ def main():
         args.output = ROOT / "dist" / "FlashLink-Windows-x64.zip"
     if args.output.suffix.lower() != ".zip":
         parser.error("--output must name the portable .zip archive")
-    host = args.exe.read_bytes()
+    original = args.sunshine_zip.read_bytes()
+    if hashlib.sha256(original).hexdigest() != DIGEST:
+        parser.error("Sunshine ZIP digest differs from the pinned upstream release")
+    if args.engine_dir:
+        original, host = build_patched_host(original, args.engine_dir, args.target)
+    else:
+        host = args.exe.read_bytes()
+        if DIGEST.encode() not in host:
+            parser.error("--exe expects a host built for the unmodified upstream runtime")
     for name, digest in VDD_DIGESTS.items():
         component = (ASSETS / "mttvdd" / name).read_bytes()
         if hashlib.sha256(component).hexdigest() != digest:
             parser.error(f"Virtual display component {name} differs from release 25.7.23")
         if component not in host:
             parser.error(f"FlashLink.exe is missing the bundled virtual display component {name}")
-    original = args.sunshine_zip.read_bytes()
-    if hashlib.sha256(original).hexdigest() != DIGEST:
-        parser.error("Sunshine ZIP digest differs from the pinned upstream release")
     sysroot = args.rust_sysroot or pathlib.Path(subprocess.check_output(
         ["rustc", "--print", "sysroot"], encoding="utf-8").strip())
     rust = sysroot/"share"/"doc"/"rust"
@@ -62,7 +107,12 @@ def main():
             out.writestr("FlashLink.exe", host)
             out.write(ROOT/"LICENSE", "LICENSE")
             out.write(ROOT/"LICENSES/FlashLink-MIT.txt", "licenses/FlashLink-MIT.txt")
-            out.write(ASSETS/"NOTICE.txt", "NOTICE.txt")
+            notice = (ASSETS/"NOTICE.txt").read_text(encoding="utf-8")
+            if args.engine_dir:
+                notice += ("\nFlashLink rebuilt Sunshine from the above source with the modifications in "
+                           "Sunshine/flashlink-live-bitrate.patch. Build instructions and corresponding patch "
+                           "are also available in the FlashLink repository at the revision of this package.\n")
+            out.writestr("NOTICE.txt", notice)
             out.writestr("使用说明.txt", (ASSETS/"使用说明.txt").read_text(encoding="utf-8").replace("\n", "\r\n").encode("utf-8-sig"))
             out.write(ASSETS/"mttvdd/LICENSE", "licenses/MttVDD-LICENSE")
             out.write(args.sunshine_license, "licenses/Sunshine-LICENSE")

@@ -16,12 +16,48 @@ jobs:
   windows:
     name: Windows host
     runs-on: windows-2022
-    timeout-minutes: 30
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
       - name: Run workspace tests on Windows
         run: cargo test --locked --workspace
-      - name: Build the Windows x64 host
-        run: cargo build --locked --release -p flashlink-host
+      - name: Set up the Sunshine toolchain
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2.32.0
+        with:
+          msystem: UCRT64
+          update: true
+          path-type: inherit
+          install: >-
+            git curl mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja mingw-w64-ucrt-x86_64-cppwinrt
+            mingw-w64-ucrt-x86_64-curl-winssl mingw-w64-ucrt-x86_64-miniupnpc
+            mingw-w64-ucrt-x86_64-nlohmann-json mingw-w64-ucrt-x86_64-onevpl
+            mingw-w64-ucrt-x86_64-openssl mingw-w64-ucrt-x86_64-opus
+            mingw-w64-ucrt-x86_64-MinHook mingw-w64-ucrt-x86_64-pkgconf
+      - name: Build patched Sunshine
+        shell: msys2 {0}
+        run: bash crates/host-windows/build-sunshine.sh
+      - name: Package Windows x64 host
+        shell: pwsh
+        run: |
+          curl.exe -fL --retry 3 -o target/sunshine/upstream.zip https://github.com/SunshineStream/Sunshine/releases/download/v2026.914.233613/Sunshine-Windows-AMD64-lite.zip
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python crates/host-windows/bundle.py --engine-dir target/sunshine/engine --sunshine-zip target/sunshine/upstream.zip --sunshine-license target/sunshine/engine/Sunshine-LICENSE --output dist/FlashLink-Windows-x64.zip
+      - name: Launch the packaged engine without the build toolchain on PATH
+        shell: pwsh
+        run: |
+          Expand-Archive dist/FlashLink-Windows-x64.zip target/package-check
+          Set-Location target/package-check/Sunshine
+          $env:Path = "$env:SystemRoot\System32;$env:SystemRoot"
+          $version = .\sunshine.exe --version | Out-String
+          if ($LASTEXITCODE -or $version -notmatch '63d35f702ee9e362e43263742981836ec0710384') {
+            throw "Packaged Sunshine did not start or reported an unexpected version. $version"
+          }
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: FlashLink-Windows-x64
+          path: dist/FlashLink-Windows-x64.*
+          if-no-files-found: error
+          retention-days: 7

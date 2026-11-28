@@ -23,17 +23,20 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.TreeSet;
+import java.util.function.BooleanSupplier;
 
 /** Edits a copy of the active stream settings until the user applies them. */
 final class FlashLinkQualityDialog {
     private final FlashLinkGame game;
     private final FlashLinkQuality active;
+    private final FlashLinkLiveBitrate.State bitrateState;
     private final AlertDialog.Builder builder;
     private final LinearLayout form;
 
-    FlashLinkQualityDialog(FlashLinkGame game, FlashLinkQuality active) {
+    FlashLinkQualityDialog(FlashLinkGame game, FlashLinkQuality active, FlashLinkLiveBitrate.State bitrateState) {
         this.game = game;
         this.active = active;
+        this.bitrateState = bitrateState;
         builder = new AlertDialog.Builder(game);
         form = new LinearLayout(builder.getContext());
         form.setOrientation(LinearLayout.VERTICAL);
@@ -99,6 +102,11 @@ final class FlashLinkQualityDialog {
             }
             @Override public void onNothingSelected(AdapterView<?> parent) {}
         });
+        if (bitrateState == FlashLinkLiveBitrate.State.UNKNOWN) {
+            TextView warning = new TextView(builder.getContext());
+            warning.setText("电脑当前码率未确认。这里显示上次确认的设置。");
+            form.addView(warning);
+        }
         String failure = game.lastQualityFailure();
         if (failure != null) {
             TextView reason = new TextView(builder.getContext());
@@ -113,6 +121,20 @@ final class FlashLinkQualityDialog {
         dialog.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN |
                 WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
         dialog.show();
+        BooleanSupplier live = () -> bitrateState == FlashLinkLiveBitrate.State.READY
+                && currentSize.equals(sizes.get(resolution.getSelectedItemPosition()))
+                && active.fps == rates.get(fps.getSelectedItemPosition());
+        Runnable updateAction = () -> dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+                .setText(live.getAsBoolean() ? "应用" : "应用并重连");
+        AdapterView.OnItemSelectedListener changed = new AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(AdapterView<?> parent, View view, int index, long id) {
+                updateAction.run();
+            }
+            @Override public void onNothingSelected(AdapterView<?> parent) {}
+        };
+        resolution.setOnItemSelectedListener(changed);
+        fps.setOnItemSelectedListener(changed);
+        updateAction.run();
         dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
             int index = bitrate.getSelectedItemPosition();
             int kbps;
@@ -132,7 +154,9 @@ final class FlashLinkQualityDialog {
             FlashLinkQuality selected = new FlashLinkQuality(Integer.parseInt(size[0]), Integer.parseInt(size[1]),
                     rates.get(fps.getSelectedItemPosition()), kbps);
             dialog.dismiss();
-            if (!active.equals(selected)) game.applyQuality(selected);
+            if (!active.equals(selected)) {
+                game.applyQuality(selected, !live.getAsBoolean());
+            }
         });
     }
 

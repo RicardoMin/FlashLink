@@ -1,4 +1,4 @@
-//! The downloadable GUI executable has the original upstream ZIP, a text notice and a fixed
+//! The downloadable GUI executable has the verified engine ZIP, a text notice and a fixed
 //! footer after the PE image. The Windows loader ignores the overlay; no external installer runs.
 use sha2::{Digest, Sha256};
 use std::os::windows::process::CommandExt;
@@ -10,13 +10,21 @@ use std::{
 };
 
 const MAGIC: &[u8; 16] = b"FLASHLINK-PACK-1";
-const LENGTH: u64 = 38_060_196;
-const ZIP_HASH: &str = "233008e46f4c0e501a586cbfd6c4fd4a4c0d414a0b5fc7f13c070eb92ec3824b";
-const EXE_HASH: &str = "a8ddf74e93297529ca5aa9c59234a7043b94587e8d11ea24c521fa69d6f59fd3";
+// bundle.py binds the two hashes into the host at compile time. Unpacked
+// developer builds retain support for the original upstream release.
+const ZIP_HASH: &str = match option_env!("FLASHLINK_ENGINE_ZIP_SHA256") {
+    Some(value) => value,
+    None => "233008e46f4c0e501a586cbfd6c4fd4a4c0d414a0b5fc7f13c070eb92ec3824b",
+};
+const EXE_HASH: &str = match option_env!("FLASHLINK_ENGINE_EXE_SHA256") {
+    Some(value) => value,
+    None => "a8ddf74e93297529ca5aa9c59234a7043b94587e8d11ea24c521fa69d6f59fd3",
+};
 
 struct Bundle {
     file: fs::File,
     zip_offset: u64,
+    zip_len: u64,
     notice_len: u64,
 }
 impl Bundle {
@@ -34,7 +42,15 @@ impl Bundle {
         }
         let size = u64::from_le_bytes(footer[..8].try_into().unwrap());
         let notice = u64::from_le_bytes(footer[8..16].try_into().unwrap());
-        if size != LENGTH || notice > 16 * 1024 * 1024 || total <= 32 + size + notice {
+        let expected_size = option_env!("FLASHLINK_ENGINE_ZIP_SIZE")
+            .unwrap_or("38060196")
+            .parse::<u64>()
+            .map_err(io::Error::other)?;
+        if size != expected_size
+            || size > 256 * 1024 * 1024
+            || notice > 16 * 1024 * 1024
+            || total <= 32 + size + notice
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "离线包长度无效，请重新下载",
@@ -43,6 +59,7 @@ impl Bundle {
         Ok(Some(Self {
             file,
             zip_offset: total - 32 - size - notice,
+            zip_len: size,
             notice_len: notice,
         }))
     }
@@ -155,12 +172,12 @@ pub fn prepare() -> io::Result<Option<PathBuf>> {
         .truncate(false)
         .open(root.join("unpack.lock"))?;
     lock.lock()?;
-    let installed = root.join("Sunshine-v2026.914.233613-AMD64");
+    let installed = root.join(format!("Sunshine-{ZIP_HASH}"));
     let exe = installed.join("Sunshine").join("sunshine.exe");
     let notices = appdata()?.join("Application").join("OpenSourceNotices.txt");
     bundle
         .file
-        .seek(SeekFrom::Start(bundle.zip_offset + LENGTH))?;
+        .seek(SeekFrom::Start(bundle.zip_offset + bundle.zip_len))?;
     let mut text = Vec::with_capacity(bundle.notice_len as usize);
     (&mut bundle.file)
         .take(bundle.notice_len)
@@ -177,12 +194,12 @@ pub fn prepare() -> io::Result<Option<PathBuf>> {
     fs::create_dir(&stage)?;
     let result = (|| {
         bundle.file.seek(SeekFrom::Start(bundle.zip_offset))?;
-        let archive = stage.join("official.zip");
+        let archive = stage.join("engine.zip");
         let mut out = fs::File::create_new(&archive)?;
-        let len = io::copy(&mut (&mut bundle.file).take(LENGTH), &mut out)?;
+        let len = io::copy(&mut (&mut bundle.file).take(bundle.zip_len), &mut out)?;
         out.flush()?;
         drop(out);
-        if len != LENGTH || hash_file(&archive)? != ZIP_HASH {
+        if len != bundle.zip_len || hash_file(&archive)? != ZIP_HASH {
             return Err(io::Error::other(
                 "内置 Sunshine 的 SHA-256 校验失败，请重新下载 FlashLink。",
             ));
