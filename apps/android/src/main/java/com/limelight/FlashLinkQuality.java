@@ -6,6 +6,18 @@ import java.math.BigDecimal;
 /** Video dimensions, negotiated frame rate and target stream bandwidth in kilobits per second. */
 final class FlashLinkQuality {
     static final String EXTRA = "dev.flashlink.streamQuality";
+    enum Preset {
+        SMOOTH("流畅", 10000), HIGH("高清", 20000), ULTRA("超清", 40000), CUSTOM("自定义", 0);
+
+        final String label;
+        final int kbps;
+
+        Preset(String label, int kbps) {
+            this.label = label;
+            this.kbps = kbps;
+        }
+    }
+
     final int width, height, fps, bitrateKbps;
 
     FlashLinkQuality(int width, int height, int fps, int bitrateKbps) {
@@ -37,8 +49,19 @@ final class FlashLinkQuality {
         return null;
     }
 
+    Preset preset() {
+        for (Preset preset : Preset.values()) {
+            if (preset.kbps == bitrateKbps) return preset;
+        }
+        return Preset.CUSTOM;
+    }
+
+    String presetLabel() { return preset().label; }
+
     String displayText() {
-        return width + " × " + height + " · " + fps + " FPS · " + mbps(bitrateKbps) + " Mbps";
+        Preset preset = preset();
+        String label = preset == Preset.CUSTOM ? preset.label + "（" + mbps(bitrateKbps) + " Mbps）" : preset.label;
+        return label + " · " + width + " × " + height + " · " + fps + "帧";
     }
 
     static String mbps(int kbps) {
