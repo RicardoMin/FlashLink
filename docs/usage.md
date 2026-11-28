@@ -7,7 +7,7 @@
 | 设备 | 系统要求 | 应用文件 |
 | --- | --- | --- |
 | 被控电脑 | Windows 10/11 x64，已登录且桌面解锁 | [Windows 单文件 EXE](../install/FlashLink-Windows-x64.exe?raw=true) 或 [便携 ZIP](../install/FlashLink-Windows-x64.zip?raw=true) |
-| 手机或平板 | Android 7.0 及以上，arm64 | [Android 测试 APK](../install/FlashLink-Android-arm64.apk?raw=true) |
+| 手机或平板 | Android 7.0 及以上，arm64 | [Android 正式签名 APK](../install/FlashLink-Android-arm64.apk?raw=true) |
 
 将 EXE 和 APK 分别复制到对应设备。Windows 单文件 EXE 和便携 ZIP 均内含 Sunshine 和防窥显示驱动，安卓应用内含 Moonlight。若使用便携 ZIP，请先完整解压，再双击其中的 `FlashLink.exe`。从 Git 克隆项目的开发者可以按下方步骤生成安装包。
 
@@ -91,7 +91,7 @@ python3 test/test_flashlink.py --mode field --android
 
 下载测试包后，可在 GitHub 打开该文件所在的提交，取得同一提交中的 FlashLink 源码、补丁和构建脚本。重新分发安装包时，请随包保留许可证与版权声明，并在下载处一并提供与该构建匹配的完整对应源码，或指明其可免费下载的位置。修改版应包含实际使用的上游版本、改动和构建脚本。
 
-以下命令均从仓库根目录执行。首次构建需要联网获取上游源码和构建依赖。修改应用后，运行受影响平台的默认打包命令，将更新的 [install 测试包](../install/) 和对应源码放进同一个 PR。要让已有安卓设备覆盖安装并保留配对数据，发布 APK 时需沿用上一版的签名。使用本机调试签名时，可通过下文的 `--output` 将测试包单独输出。两端的第三方组件版本、许可证和源码入口见 [Android 声明](../apps/android/NOTICE.txt) 和 [Windows 声明](../crates/host-windows/assets/NOTICE.txt)。
+以下命令均从仓库根目录执行。首次构建需要联网获取上游源码和构建依赖。发布时，请把更新的安装包和对应源码放进同一个 PR。[安装包](../install/) · [Android 第三方组件](../apps/android/NOTICE.txt) · [Windows 第三方组件](../crates/host-windows/assets/NOTICE.txt)
 
 ### Windows 被控端
 
@@ -119,4 +119,15 @@ rustup target add aarch64-linux-android
 python3 apps/android/build.py
 ```
 
-默认构建成功后，APK 会写入 `install/FlashLink-Android-arm64.apk`，并保留 `build/android/flashlink-arm64-debug.apk`。两端的打包命令均可使用 `--output` 指定独立输出位置，用于本地试验。[Android 构建脚本](../apps/android/build.py)
+上述命令生成 `build/android/flashlink-arm64-debug.apk`，供本机开发测试。维护者可在 PowerShell 中执行以下命令来更新 `install/FlashLink-Android-arm64.apk`。
+
+```powershell
+$env:FLASHLINK_ANDROID_SIGNING_CONFIG = "$env:LOCALAPPDATA\FlashLink-Signing\key.json"
+python apps/android/build.py --release
+```
+
+`FLASHLINK_ANDROID_SIGNING_CONFIG` 指向仓库外的 UTF-8 JSON 文件，包含 `storeFile`、`keyAlias`、`storePassword` 和 `keyPassword` 四个字符串。`storeFile` 可使用绝对路径，也可相对于 JSON 文件指定。请将密钥库和配置作为私密文件单独备份。脚本核验发布证书后才更新 `install/`。需要用自己的密钥测试 release 构建时，使用 `--release --output build/android-local`。[Android 构建脚本](../apps/android/build.py)
+
+从 0.3.0 起，正式 Android 包名为 `io.github.ricardomin.flashlink`，证书 SHA-256 为 `AED857ABE3A382A0D61111BC9F69DF5EDCFF7EE1F73027A28D773816C52F6BBF`。旧测试版 `dev.flashlink.demo.debug` 与正式版可同时安装。首次使用正式版时，请重新配对 Windows 主机并设置播放偏好。以后的正式版沿用同一包名和密钥，并递增 `versionCode`，可直接覆盖升级。
+
+在 OPPO 办理侧载应用身份验证时，从登录后的「应用分发 → 应用管理 → 应用验证 → 新增验证」下载平台提供的 APK 空包。在上面配置过签名环境的终端执行 `python apps/android/build.py --sign-verification-apk <空包路径>`。脚本会在空包旁写出 `原文件名-signed.apk` 并核对正式证书。把这个签过的空包上传到同一页面，核对 FlashLink 的包名和证书后提交。[OPPO 开发者身份验证操作指南](https://open.oppomobile.com/documentation/page/info?id=13895)
