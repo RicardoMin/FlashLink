@@ -25,6 +25,8 @@ stream quality and confirm the new settings when the first decoded frame reaches
 active while its output is muted for computer-only playback.
 2026-11-28: add in-session bitrate requests and acknowledgements to the Android
 bridge and the pinned moonlight-common-c encrypted control stream.
+2026-11-28: add live frame rate control, session-scoped acknowledgements,
+renderer pacing updates and seamless display refresh requests on Android.
 The integration patches and their build script are under apps/android/.
 Distributors of the combined APK should provide the complete corresponding source
 and build scripts for the exact binary with the distribution.

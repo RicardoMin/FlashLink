@@ -17,7 +17,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 ASSETS = pathlib.Path(__file__).resolve().parent / "assets"
 DIGEST = "233008e46f4c0e501a586cbfd6c4fd4a4c0d414a0b5fc7f13c070eb92ec3824b"
 ENGINE_COMMIT = "63d35f702ee9e362e43263742981836ec0710384"
-ENGINE_PATCH = ROOT / "integrations/sunshine/live-bitrate.patch"
+ENGINE_PATCH = ROOT / "integrations/sunshine/live-settings.patch"
 VDD_DIGESTS = {
     "MttVDD.inf": "550d211fe481e74dfe3f9d724ed78be48b3a9113405965d683d9373e8d672f5d",
     "MttVDD.dll": "c9ca837f57a98fbd43bc416a7f535a95843626e7759eaf85cf0cd7ce334dbb05",
@@ -41,7 +41,7 @@ def build_patched_host(original, engine_dir, target):
         for item in base.infolist():
             data = binary if item.filename == exe_path else base.read(item)
             engine.writestr(item, data)
-        info = zipfile.ZipInfo("Sunshine/flashlink-live-bitrate.patch", base.getinfo(exe_path).date_time)
+        info = zipfile.ZipInfo("Sunshine/flashlink-live-settings.patch", base.getinfo(exe_path).date_time)
         engine.writestr(info, ENGINE_PATCH.read_bytes().replace(b"\r\n", b"\n"), zipfile.ZIP_DEFLATED)
     archive = output.getvalue()
     zip_hash = hashlib.sha256(archive).hexdigest()
@@ -110,7 +110,7 @@ def main():
             notice = (ASSETS/"NOTICE.txt").read_text(encoding="utf-8")
             if args.engine_dir:
                 notice += ("\nFlashLink rebuilt Sunshine from the above source with the modifications in "
-                           "Sunshine/flashlink-live-bitrate.patch. Build instructions and corresponding patch "
+                           "Sunshine/flashlink-live-settings.patch. Build instructions and corresponding patch "
                            "are also available in the FlashLink repository at the revision of this package.\n")
             out.writestr("NOTICE.txt", notice)
             out.writestr("使用说明.txt", (ASSETS/"使用说明.txt").read_text(encoding="utf-8").replace("\n", "\r\n").encode("utf-8-sig"))

@@ -6,7 +6,7 @@ root=$(cd "$(dirname "$0")/../.." && pwd)
 work=${1:-"$root/target/sunshine"}
 mkdir -p "$work"
 work=$(cd "$work" && pwd)
-patch="$root/integrations/sunshine/live-bitrate.patch"
+patch="$root/integrations/sunshine/live-settings.patch"
 revision=63d35f702ee9e362e43263742981836ec0710384
 patch_hash=$(tr -d '\r' < "$patch" | sha256sum | cut -d' ' -f1)
 src="$work/src-${patch_hash:0:12}"
