@@ -22,6 +22,9 @@ import com.limelight.nvstream.NvConnection;
 import com.limelight.nvstream.jni.MoonBridge;
 import com.limelight.preferences.PreferenceConfiguration;
 
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
 /** Thin shell around Moonlight's real Activity and its native callbacks. */
 public final class FlashLinkGame extends Game {
     static final String DEADLINE = "dev.flashlink.recoveryDeadline";
@@ -54,6 +57,80 @@ public final class FlashLinkGame extends Game {
     private volatile String negotiationProblem;
     private TextView qualityProgress;
     private final Runnable qualityTimeout = () -> qualityFailed("等待电脑连接并传回第一帧画面超时。", true);
+
+    private final ExecutorService bitrateSender = Executors.newSingleThreadExecutor();
+    private final FlashLinkLiveBitrate liveBitrate = new FlashLinkLiveBitrate(new FlashLinkLiveBitrate.Listener() {
+        @Override public void send(int id, int kbps) {
+            bitrateSender.execute(() -> {
+                if (!MoonBridge.requestBitrate(FlashLinkGame.this, id, kbps)) {
+                    timer.post(() -> liveBitrate.timeout(id));
+                }
+            });
+            timer.postDelayed(() -> liveBitrate.timeout(id), 2000);
+        }
+
+        @Override public void result(FlashLinkLiveBitrate.Result result, int kbps) {
+            if (kbps > 0 && activeQuality != null) {
+                activeQuality = new FlashLinkQuality(activeQuality.width, activeQuality.height, activeQuality.fps, kbps);
+                updateStreamBitrate(kbps, result == FlashLinkLiveBitrate.Result.APPLIED);
+            }
+            switch (result) {
+                case APPLIED:
+                    Log.i(LOG, "BITRATE_APPLIED " + kbps);
+                    notifyBitrate("目标码率已切换至 " + FlashLinkQuality.mbps(kbps) + " Mbps");
+                    break;
+                case REJECTED:
+                    notifyBitrate("电脑未应用所选码率，串流继续。");
+                    break;
+                case UNCONFIRMED:
+                    notifyBitrate("尚未确认电脑当前码率，串流继续。");
+                    break;
+                case CURRENT:
+                    break;
+            }
+            if (openQualityWhenReady) {
+                openQualityWhenReady = false;
+                if (foreground && !handingOff && !isFinishing() && !isDestroyed()) openQualityDialog();
+            }
+        }
+    });
+    private boolean openQualityWhenReady;
+
+    private void notifyBitrate(String message) {
+        if (foreground && !isFinishing()) Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
+    }
+
+    @Override public void bitrateResult(int id, int status, int kbps) {
+        timer.post(() -> liveBitrate.response(id, status, kbps));
+    }
+
+    void showQualitySettings() {
+        switch (liveBitrate.state()) {
+            case PROBING:
+            case UNKNOWN:
+                openQualityWhenReady = true;
+                liveBitrate.probe();
+                return;
+            case VERIFYING:
+            case SETTING:
+                notifyBitrate("正在确认目标码率…");
+                return;
+            case CLOSED:
+                return;
+            default:
+                openQualityDialog();
+        }
+    }
+
+    private void openQualityDialog() {
+        new FlashLinkQualityDialog(this, activeQuality, liveBitrate.state()).show();
+    }
+
+    private void closeBitrate() {
+        openQualityWhenReady = false;
+        liveBitrate.close();
+        bitrateSender.shutdownNow();
+    }
 
     @Override protected void onCreate(Bundle state) {
         pendingQuality = FlashLinkQuality.fromArray(getIntent().getIntArrayExtra(FlashLinkQuality.EXTRA));
@@ -119,13 +196,18 @@ public final class FlashLinkGame extends Game {
         }
         tools = new FlashLinkStreamTools(this);
         tools.attach();
+        liveBitrate.probe();
     }
 
     FlashLinkQuality currentQuality() { return activeQuality; }
     String lastQualityFailure() { return isRestoring() ? getIntent().getStringExtra(FAILURE) : null; }
 
-    void applyQuality(FlashLinkQuality selected) {
+    void applyQuality(FlashLinkQuality selected, boolean reconnect) {
         if (tools == null || activeQuality == null || selected.equals(activeQuality) || handingOff) return;
+        if (!reconnect) {
+            if (!liveBitrate.set(selected.bitrateKbps)) notifyBitrate("暂时无法切换目标码率，请重试。");
+            return;
+        }
         Intent next = new Intent(getIntent());
         next.putExtra(FlashLinkQuality.EXTRA, selected.toArray());
         next.putExtra(PREVIOUS_QUALITY, activeQuality.toArray());
@@ -162,6 +244,7 @@ public final class FlashLinkGame extends Game {
 
     private void handOffQuality(int result, Intent next) {
         handingOff = true;
+        closeBitrate();
         if (privacyLease != null) {
             privacyLease.handoff();
             privacyLease = null;
@@ -193,6 +276,7 @@ public final class FlashLinkGame extends Game {
         runOnUiThread(() -> {
             if (handingOff || isFinishing() || isDestroyed()) return;
             releaseControls();
+            closeBitrate();
             // Decide alongside the first-frame callback: it may already have committed this profile.
             if (pendingQuality != null) {
                 qualityFailed(code == MoonBridge.ML_ERROR_NO_VIDEO_FRAME || code == MoonBridge.ML_ERROR_NO_VIDEO_TRAFFIC
@@ -390,11 +474,13 @@ public final class FlashLinkGame extends Game {
     }
 
     @Override protected void onStop() {
+        closeBitrate();
         closeLease(true);
         super.onStop();
     }
 
     @Override protected void onDestroy() {
+        closeBitrate();
         releaseControls();
         closeLease(true);
         timer.removeCallbacksAndMessages(null);

@@ -54,7 +54,11 @@
 
 在安卓「设置 → 播放设置」可调整分辨率、帧率、码率并查看性能统计。首次使用时，2560×1440 及以上的屏幕默认请求 1440p/60 FPS，1920×1080 级屏幕请求 1080p/60 FPS，更小的屏幕请求 720p/60 FPS。可根据小字清晰度、语音连续性和实际渲染帧率调整。
 
-串流中点「工具 → 串流画质」，可以查看当前视频尺寸、会话帧率和目标码率。分辨率、帧率和码率可以单独修改，也可以一起应用。码率支持常用档位，也可自定义为 0.5–150 Mbps。点「应用并重连」后，安卓会显示进度并重新连接同一台电脑的桌面。收到符合所选参数的首帧后，新设置会保存到播放设置。若切换失败，安卓会显示原因并恢复上次可用画质。画质恢复遇到临时连接错误时会在 30 秒内重试，之后仍可在当前页点「重试原画质」。性能统计可查看实际接收和渲染帧率，静态桌面上的帧率可能更低。
+串流中点「工具 → 串流画质」可以查看当前视频尺寸、会话帧率和目标码率。码率支持常用档位，也可自定义为 0.5–150 Mbps。
+
+只改目标码率时，两端均已升级且当前使用支持动态码率的 NVIDIA H.264 硬件编码器，按钮会显示「应用」。点击后画面、声音和输入继续，电脑确认生效后，安卓会提示新码率并保存。若电脑拒绝或无法确认结果，播放器会提示并继续串流。
+
+修改分辨率或帧率、使用旧版主机或其他编码器时，按钮显示「应用并重连」。安卓会重新连接同一台电脑，收到符合所选参数的首帧后保存设置。若协商失败，安卓会显示原因并恢复上次可用画质。恢复遇到临时连接错误时会在 30 秒内重试，之后仍可点「重试原画质」。性能统计可查看实际接收和渲染帧率，静态桌面上的帧率可能更低。
 
 | 现象 | 操作 |
 | --- | --- |
@@ -87,15 +91,21 @@ python3 test/test_flashlink.py --mode field --android
 
 下载测试包后，可在 GitHub 打开该文件所在的提交，取得同一提交中的 FlashLink 源码、补丁和构建脚本。重新分发安装包时，请随包保留许可证与版权声明，并在下载处一并提供与该构建匹配的完整对应源码，或指明其可免费下载的位置。修改版应包含实际使用的上游版本、改动和构建脚本。
 
-以下命令均从仓库根目录执行。首次构建需要联网获取上游源码和构建依赖。修改应用后，运行受影响平台的默认打包命令，将更新的 [install 测试包](../install/) 和对应源码放进同一个 PR。安卓测试包沿用同一签名，方便已有设备覆盖安装并保留配对数据。两端的第三方组件版本、许可证和源码入口见 [Android 声明](../apps/android/NOTICE.txt) 和 [Windows 声明](../crates/host-windows/assets/NOTICE.txt)。
+以下命令均从仓库根目录执行。首次构建需要联网获取上游源码和构建依赖。修改应用后，运行受影响平台的默认打包命令，将更新的 [install 测试包](../install/) 和对应源码放进同一个 PR。要让已有安卓设备覆盖安装并保留配对数据，发布 APK 时需沿用上一版的签名。使用本机调试签名时，可通过下文的 `--output` 将测试包单独输出。两端的第三方组件版本、许可证和源码入口见 [Android 声明](../apps/android/NOTICE.txt) 和 [Windows 声明](../crates/host-windows/assets/NOTICE.txt)。
 
 ### Windows 被控端
 
-在 Windows x64 上准备 Rust 1.89 或更新版本（MSVC 工具链）、Visual Studio C++ 构建工具和 Python 3。下载固定版本的 `Sunshine-Windows-AMD64-lite.zip`，将同一版本的许可证另存为 `Sunshine-LICENSE`。以下命令假定这两个文件位于当前用户的 Downloads 目录。[Sunshine 发行包](https://github.com/SunshineStream/Sunshine/releases/tag/v2026.914.233613) · [对应许可证原文](https://raw.githubusercontent.com/SunshineStream/Sunshine/v2026.914.233613/LICENSE)
+在 Windows x64 准备 Rust 1.89 或更新版本（MSVC 工具链）、Visual Studio C++ 构建工具、Python 3、Windows 版 Node.js 和 MSYS2。在仓库目录打开 MSYS2 UCRT64 终端，安装构建依赖，然后编译包含实时码率补丁的 Sunshine。确保 Windows 版 npm 在 PATH 中。
+
+```bash
+pacman -S --needed git curl mingw-w64-ucrt-x86_64-{gcc,cmake,ninja,cppwinrt,curl-winssl,miniupnpc,nlohmann-json,onevpl,openssl,opus,MinHook,pkgconf}
+bash crates/host-windows/build-sunshine.sh
+```
+
+下载基线版本的 `Sunshine-Windows-AMD64-lite.zip` 到 Downloads。回到 PowerShell，使用编译好的引擎与官方资源一起打包。[Sunshine 发行包](https://github.com/SunshineStream/Sunshine/releases/tag/v2026.914.233613)
 
 ```powershell
-cargo build --locked --release -p flashlink-host
-python crates/host-windows/bundle.py --exe target/release/flashlink-host.exe --sunshine-zip "$env:USERPROFILE\Downloads\Sunshine-Windows-AMD64-lite.zip" --sunshine-license "$env:USERPROFILE\Downloads\Sunshine-LICENSE"
+python crates/host-windows/bundle.py --engine-dir target/sunshine/engine --sunshine-zip "$env:USERPROFILE\Downloads\Sunshine-Windows-AMD64-lite.zip" --sunshine-license target/sunshine/engine/Sunshine-LICENSE
 ```
 
 打包脚本核验 Sunshine 的 SHA-256 后生成单文件 EXE 和便携 ZIP，默认同步到 `install/`，并保留 `dist/` 中的构建副本。

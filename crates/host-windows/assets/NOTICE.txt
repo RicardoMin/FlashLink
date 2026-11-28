@@ -10,11 +10,10 @@ FlashLink host and launcher
 Sunshine
   Developed by the Sunshine authors and contributors.
   Release: v2026.914.233613
-  The Windows application embeds the original upstream archive. The portable
-  ZIP also includes its files in the Sunshine directory. Both use the official
-  Sunshine-Windows-AMD64-lite.zip portable binary distribution. FlashLink
-  starts Sunshine as a separate process. The upstream GPL version 3 text is
-  in licenses/Sunshine-LICENSE. Original archive SHA-256: 233008e46f4c0e501a586cbfd6c4fd4a4c0d414a0b5fc7f13c070eb92ec3824b
+  Both the single-file Windows application and the portable ZIP include Sunshine
+  runtime assets from Sunshine-Windows-AMD64-lite.zip. FlashLink starts Sunshine
+  as a separate process. The upstream GPL version 3 text is in
+  licenses/Sunshine-LICENSE. Upstream archive SHA-256: 233008e46f4c0e501a586cbfd6c4fd4a4c0d414a0b5fc7f13c070eb92ec3824b
   Release and build artifacts:
     https://github.com/SunshineStream/Sunshine/releases/tag/v2026.914.233613
   Corresponding source, build instructions, and submodule revisions:

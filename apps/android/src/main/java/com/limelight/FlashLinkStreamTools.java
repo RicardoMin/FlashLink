@@ -187,7 +187,7 @@ final class FlashLinkStreamTools {
         if (active != null) {
             TextView quality = button("串流画质\n" + active.displayText(), () -> {
                 collapse();
-                new FlashLinkQualityDialog(game, active).show();
+                game.showQualitySettings();
             });
             panel.addView(quality, new LinearLayout.LayoutParams(MATCH, dp(60)));
         }

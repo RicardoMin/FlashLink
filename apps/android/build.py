@@ -17,6 +17,8 @@ import zipfile
 ANDROID = Path(__file__).resolve().parent
 ROOT = ANDROID.parents[1]
 PIN = "1b1b100e63e8ffcf1496e324ff7b57ee9f2db2a9"
+COMMON_PIN = "8af4562af672dd6b9ed28553ead172984fd9a683"
+COMMON = Path("app/src/main/jni/moonlight-core/moonlight-common-c")
 ORIGIN = "https://github.com/moonlight-stream/moonlight-android.git"
 MODULE = ROOT / "apps/flashlink"
 RUST_TARGET = "aarch64-linux-android"
@@ -27,29 +29,44 @@ def run(args, cwd, env=None):
     subprocess.run(list(map(str, args)), cwd=cwd, env=env, check=True)
 
 
-def check_revision(host):
+def check_revision(host, expected=PIN):
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=host, text=True).strip()
-    if revision != PIN:
-        raise ValueError(f"Unexpected Moonlight revision {revision}; expected {PIN}.")
+    if revision != expected:
+        raise ValueError(f"Unexpected Moonlight revision {revision}; expected {expected}.")
+
+
+def apply_patch(host, patch, *options):
+    # Git for Windows can check patch files out as CRLF. A blank context line
+    # must end in LF for "git apply" to recognize the next hunk.
+    subprocess.run(["git", "apply", *options, "-"], cwd=host, input=patch, check=True)
 
 
 def prepare(output, origin):
-    patch = ANDROID / "moonlight-v12.1.patch"
-    suffix = hashlib.sha256(patch.read_bytes()).hexdigest()[:16]
+    android_patch, bridge_patch, common_patch = [
+        (ANDROID / name).read_bytes().replace(b"\r\n", b"\n") for name in
+        ("moonlight-v12.1.patch", "moonlight-live-bitrate.patch", "moonlight-common-live-bitrate.patch")]
+    suffix = hashlib.sha256(android_patch + bridge_patch + common_patch).hexdigest()[:16]
     host = output / f"moonlight-{PIN[:8]}-{suffix}"
     output.mkdir(parents=True, exist_ok=True)
     if host.exists():
         if not (host / ".git/flashlink-generated").is_file():
             raise ValueError(f"Unmanaged source directory: {host}. Choose another --output.")
         check_revision(host)
-        run(["git", "apply", "--check", "--reverse", patch], host)
+        check_revision(host / COMMON, COMMON_PIN)
+        apply_patch(host, android_patch, "--check", "--reverse")
+        apply_patch(host, bridge_patch, "--check", "--reverse")
+        apply_patch(host / COMMON, common_patch, "--check", "--reverse")
     else:
-        # Only publish the build checkout after both the pin and patch have been verified.
         with tempfile.TemporaryDirectory(dir=output) as tmp:
             checkout = Path(tmp) / "moonlight"
             run(["git", "clone", "--depth", "1", "--branch", "v12.1", origin, checkout], ROOT)
             check_revision(checkout)
-            run(["git", "apply", patch], checkout)
+            run(["git", "submodule", "update", "--init", "--recursive"], checkout)
+            common = checkout / COMMON
+            check_revision(common, COMMON_PIN)
+            apply_patch(checkout, android_patch)
+            apply_patch(checkout, bridge_patch)
+            apply_patch(common, common_patch)
             (checkout / ".git/flashlink-generated").touch()
             checkout.rename(host)
     assets = host / "app/src/main/assets/licenses"
@@ -109,7 +126,6 @@ def copy_apk(source, destination):
 
 def build(output, host):
     compiler, version = android_ndk()
-    run(["git", "submodule", "update", "--init", "--recursive"], host)
     rust_env = os.environ.copy()
     rust_env["CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER"] = str(compiler)
     target = output / "cargo"
