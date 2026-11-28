@@ -53,9 +53,9 @@ Windows 主进程提供系统托盘、逐设备撤销和报告导出。EXE 和�
 
 两个安卓入口读写同一组播放位置和断开偏好。播放器启动前会用已配对证书探测主机能力。支持声音控制时，Moonlight 请求 Sunshine 保留默认播放设备，Windows 继续采集该设备的 WASAPI 回环音频。安卓单独调整串流 `AudioTrack` 的增益，所以「仅电脑播放」也能读到用户真实的媒体音量。老主机沿用 Moonlight 的播放协商。[安卓设置](../apps/android/src/main/java/com/limelight/FlashLinkAudio.java) · [播放器](../apps/android/src/main/java/com/limelight/FlashLinkGame.java)
 
-串流建立后，安卓在原有双向 TLS 心跳中发送播放位置、断开策略、系统媒体音量百分比和静音状态。Windows 按客户端身份、会话编号和包序号接收更新，排除上一场会话迟到的退出消息。主动退出附带最终音量，掉线则保留最近的样本，直到重连宽限期结束。画质切换有独立的交接标记，避免重新协商时短暂恢复外放。[安卓会话通道](../apps/android/src/main/java/com/limelight/FlashLinkPrivacyLease.java) · [Windows 消息处理](../crates/host-windows/src/audio_wire.rs)
+两端都支持开流前静音时，选择「仅手机或平板播放」会先向 Windows 发送准备请求。Windows 成功静音默认输出后才应答，安卓收到确认才启动媒体。若启动取消或准备心跳过期，主机会撤销这次临时静音。串流建立后，安卓通过双向 TLS 心跳更新播放位置、断开策略、媒体音量百分比和静音状态。Windows 按客户端身份、会话编号和包序号接收更新。主动退出附带最终音量，画质切换使用单独的交接消息。[安卓会话通道](../apps/android/src/main/java/com/limelight/FlashLinkPrivacyLease.java) · [Windows 消息处理](../crates/host-windows/src/audio_wire.rs)
 
-Rust 负责会话策略和默认播放设备切换，Core Audio 负责读写 Windows 端点音量。串流切回本机播放时，主机只撤销 FlashLink 施加的临时静音。真正结束时，「跟随」写入音量及静音状态，「保持电脑静音」只设静音，保留 Windows 滑块位置。[声音策略](../crates/host-windows/src/audio.rs) · [Windows Core Audio](../crates/host-windows/src/audio_endpoint.cpp)
+声音控制心跳超出重连宽限期时，Windows 检查当前 Sunshine 进程是否仍持有媒体音频端口。媒体仍在线时保留串流路由，会话结束后用最后收到的样本执行断开策略。「跟随」写入音量和静音状态，「保持电脑静音」只设静音，保留 Windows 滑块位置。如果默认设备暂时不可用，运行中的主机会在设备恢复后重试。串流切回本机播放时，主机只撤销 FlashLink 施加的临时静音。[声音策略](../crates/host-windows/src/audio.rs) · [媒体端口检查](../crates/host-windows/src/media_transport.cpp) · [Windows Core Audio](../crates/host-windows/src/audio_endpoint.cpp)
 
 ## 构建
 

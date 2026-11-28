@@ -223,8 +223,21 @@ public final class FlashLinkSessionActivity extends Activity {
             Intent game = ServerHelper.createStartIntent(this, desktop, details, uid);
             game.setClass(this, FlashLinkGame.class);
             game.putExtra(FlashLinkGame.DEADLINE, recovery.deadline);
-            game.putExtra(FlashLinkAudio.MANAGED, FlashLinkPrivacyLease.supportsAudio(
-                    getApplicationContext(), host, port, trusted.getEncoded()));
+            stage = "连接电脑声音控制通道";
+            int capability;
+            try {
+                capability = FlashLinkPrivacyLease.audioCapability(getApplicationContext(), host, port, trusted.getEncoded());
+            } catch (javax.net.ssl.SSLException identityError) {
+                throw identityError;
+            } catch (IOException unavailable) {
+                if (recovery.deadline > 0) throw unavailable;
+                boolean allowCompatibility = !FlashLinkAudio.knownManaged(this, digest);
+                runOnUiThread(() -> audioUnavailable(game, allowCompatibility));
+                return;
+            }
+            if (capability > 0) FlashLinkAudio.rememberManaged(this, digest);
+            game.putExtra(FlashLinkAudio.MANAGED, capability >= 1);
+            game.putExtra(FlashLinkAudio.PREFLIGHT, capability >= 2);
             runOnUiThread(() -> { if (!stopped) { ready = game; openIfResumed(); } });
         } catch (Exception e) {
             if (stopped) return;
@@ -243,6 +256,26 @@ public final class FlashLinkSessionActivity extends Activity {
             if (database != null) database.close();
             handler.removeCallbacks(timeout);
         }
+    }
+
+    private void audioUnavailable(Intent game, boolean allowCompatibility) {
+        if (stopped || isFinishing() || isDestroyed()) return;
+        android.app.AlertDialog.Builder dialog = new android.app.AlertDialog.Builder(this)
+                .setTitle("电脑声音控制通道暂时无法连接")
+                .setPositiveButton("重试", (d, w) -> new Thread(this::connect, "FlashLink Desktop").start())
+                .setNegativeButton("返回设备列表", (d, w) -> finish())
+                .setOnCancelListener(d -> finish());
+        if (allowCompatibility) {
+            dialog.setMessage("可以重试声音控制，或按兼容模式打开桌面。本次使用兼容模式时，无法在串流中切换播放位置，也无法应用断开后的电脑音量设置。")
+                    .setNeutralButton("使用兼容模式", (d, w) -> {
+                        if (stopped) return;
+                        ready = game;
+                        openIfResumed();
+                    });
+        } else {
+            dialog.setMessage("这台电脑支持声音控制。请检查电脑和局域网后重试，以使用已设置的播放位置和断开策略。");
+        }
+        dialog.show();
     }
 
     private void openIfResumed() {

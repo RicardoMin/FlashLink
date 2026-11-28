@@ -16,6 +16,7 @@ import android.widget.TextView;
 
 /** The settings screen and the player use the same two persisted choices. */
 public final class FlashLinkAudio {
+    static final String PREFLIGHT = "dev.flashlink.audioPreflight";
     static final String MANAGED = "dev.flashlink.managedAudio";
     private static final String ROUTE = "flashlink_audio_route";
     private static final String AFTER = "flashlink_audio_after";
@@ -28,6 +29,18 @@ public final class FlashLinkAudio {
     private static final String[] ACTIONS = {"跟随手机或平板的媒体音量", "保持电脑静音"};
 
     private FlashLinkAudio() { }
+
+    static boolean knownManaged(Context context, String fingerprint) {
+        return PreferenceManager.getDefaultSharedPreferences(context)
+                .getBoolean("flashlink_has_audio_" + fingerprint, false);
+    }
+
+    static void rememberManaged(Context context, String fingerprint) {
+        if (!knownManaged(context, fingerprint)) {
+            PreferenceManager.getDefaultSharedPreferences(context).edit()
+                    .putBoolean("flashlink_has_audio_" + fingerprint, true).apply();
+        }
+    }
 
     static String route(Context context) {
         SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(context);
@@ -65,7 +78,7 @@ public final class FlashLinkAudio {
     static void show(FlashLinkGame game) {
         if (!game.getIntent().getBooleanExtra(MANAGED, false)) {
             new AlertDialog.Builder(game).setTitle("串流声音")
-                    .setMessage("当前连接使用兼容音频模式。请确认 Windows 主机已更新后重新连接，即可在串流中切换播放位置及设置断开后的电脑音量。")
+                    .setMessage("当前连接使用兼容音频模式。要在串流中切换播放位置或控制断开后的电脑音量，请确认 Windows 主机已更新、声音控制通道可用后重新连接。")
                     .setPositiveButton("确定", null).show();
             return;
         }

@@ -319,7 +319,7 @@ fn run_engine(
     });
     setup.show(ui);
     let mut active: Option<(String, super::lan::Approval, Instant)> = None;
-    let mut audio = crate::audio::Playback::new(&nearby, ui);
+    let mut audio = crate::audio::Playback::new(&nearby, ui, child.id(), base);
     let mut next_poll = Instant::now();
     let mut next_deferred = Instant::now();
     let mut failures = 0;

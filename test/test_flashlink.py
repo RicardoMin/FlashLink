@@ -139,6 +139,7 @@ def development():
     with tempfile.TemporaryDirectory() as java_classes:
         for check_name, name in (("android_recovery", "FlashLinkReconnect"),
                                  ("android_touch", "FlashLinkTouchGesture"),
+                                 ("android_audio", "FlashLinkAudioControl"),
                                  ("android_quality", "FlashLinkQuality")):
             compile_check = check_name + "_compile"
             check(compile_check, [jdk_tool("javac"), "-sourcepath", android / "main/java", "-d", java_classes,

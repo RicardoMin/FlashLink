@@ -11,6 +11,7 @@ import android.preference.PreferenceManager;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.MotionEvent;
+import android.view.SurfaceHolder;
 import android.view.View;
 import android.widget.FrameLayout;
 import android.widget.TextView;
@@ -44,6 +45,9 @@ public final class FlashLinkGame extends Game {
     private FlashLinkStreamTouch streamTouch;
     private FlashLinkPrivacyLease privacyLease;
     private AndroidAudioRenderer audioRenderer;
+    private boolean mediaRequested;
+    private SurfaceHolder pendingSurface;
+    private Runnable startMedia;
     private FlashLinkQuality activeQuality;
     private volatile FlashLinkQuality pendingQuality;
     private volatile boolean handingOff;
@@ -77,11 +81,10 @@ public final class FlashLinkGame extends Game {
             }
             timer.removeCallbacks(expire);
             Log.i(LOG, recoveryDeadline == 0 ? "STREAM_STARTED" : "STREAM_RESUMED");
-            privacyLease = FlashLinkPrivacyLease.start(this, getIntent().getStringExtra(EXTRA_HOST),
-                    getIntent().getIntExtra(EXTRA_PORT, com.limelight.nvstream.http.NvHTTP.DEFAULT_HTTP_PORT),
-                    getIntent().getByteArrayExtra(EXTRA_SERVER_CERT), managedAudio());
+            if (privacyLease == null) privacyLease = startLease(null);
+            else privacyLease.connected();
             if (!managedAudio() && recoveryDeadline == 0 && pendingQuality == null) {
-                Toast.makeText(this, "当前主机使用兼容音频模式。要控制断开后的电脑音量，请更新 Windows 主机。", Toast.LENGTH_LONG).show();
+                Toast.makeText(this, "本次使用兼容音频模式，断开后的电脑音量设置不会生效。", Toast.LENGTH_LONG).show();
             }
             streamReady();
         });
@@ -217,6 +220,7 @@ public final class FlashLinkGame extends Game {
 
     @Override public void stageFailed(String stage, int ports, int error) {
         if (handingOff || isFinishing()) return;
+        runOnUiThread(() -> { if (startedAt == 0) closeLease(false); });
         if (pendingQuality != null) {
             String detail = negotiationProblem;
             String reason = stage + " 阶段失败" + (error != 0 ? "（" + error + "）" : "") + "。";
@@ -270,6 +274,59 @@ public final class FlashLinkGame extends Game {
         return getIntent().getBooleanExtra(FlashLinkAudio.MANAGED, false);
     }
 
+    private FlashLinkPrivacyLease startLease(FlashLinkPrivacyLease.Preflight preflight) {
+        return FlashLinkPrivacyLease.start(this, getIntent().getStringExtra(EXTRA_HOST),
+                getIntent().getIntExtra(EXTRA_PORT, com.limelight.nvstream.http.NvHTTP.DEFAULT_HTTP_PORT),
+                getIntent().getByteArrayExtra(EXTRA_SERVER_CERT), managedAudio(), preflight);
+    }
+
+    @Override public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
+        boolean needsMute = getIntent().getBooleanExtra(FlashLinkAudio.PREFLIGHT, false)
+                && FlashLinkAudio.CONTROLLER.equals(FlashLinkAudio.route(this));
+        if (mediaRequested || (pendingSurface == null && !needsMute)) {
+            mediaRequested = true;
+            super.surfaceChanged(holder, format, width, height);
+            return;
+        }
+        pendingSurface = holder;
+        startMedia = () -> super.surfaceChanged(holder, format, width, height);
+        prepareSurface();
+    }
+
+    private void prepareSurface() {
+        if (!foreground || pendingSurface == null || privacyLease != null) return;
+        privacyLease = startLease((lease, muted) -> runOnUiThread(() -> {
+            if (privacyLease != lease || handingOff || isFinishing() || isDestroyed()) return;
+            if (!muted) {
+                closeLease(false);
+                String reason = "电脑未确认扬声器已静音。请检查电脑的播放设备和局域网后重新连接。";
+                if (pendingQuality != null) qualityFailed(reason, true);
+                else {
+                    Toast.makeText(this, reason, Toast.LENGTH_LONG).show();
+                    finish();
+                }
+                return;
+            }
+            // A queued confirmation may outlive its Surface or the host's preparation lease.
+            if (mediaRequested || !foreground || pendingSurface == null || !pendingSurface.getSurface().isValid()
+                    || !lease.canStart()) return;
+            mediaRequested = true;
+            pendingSurface = null;
+            Runnable start = startMedia;
+            startMedia = null;
+            start.run();
+        }));
+    }
+
+    @Override public void surfaceDestroyed(SurfaceHolder holder) {
+        if (pendingSurface == holder) {
+            pendingSurface = null;
+            startMedia = null;
+            closeLease(false);
+        }
+        super.surfaceDestroyed(holder);
+    }
+
     @Override protected boolean playAudioOnHost() {
         // The upgraded host captures its ordinary output and controls the physical speaker itself.
         return managedAudio() || !FlashLinkAudio.CONTROLLER.equals(FlashLinkAudio.route(this));
@@ -301,13 +358,18 @@ public final class FlashLinkGame extends Game {
         if (tools != null && tools.collapse()) return;
         leaveStream();
     }
-    @Override protected void onResume() { super.onResume(); foreground = true; }
+    @Override protected void onResume() {
+        super.onResume();
+        foreground = true;
+        prepareSurface();
+    }
     @Override public void onWindowFocusChanged(boolean focus) {
         super.onWindowFocusChanged(focus);
         if (!focus) releaseControls();
     }
     @Override protected void onPause() {
         foreground = false;
+        if (pendingSurface != null) closeLease(false);
         releaseControls();
         super.onPause();
     }
