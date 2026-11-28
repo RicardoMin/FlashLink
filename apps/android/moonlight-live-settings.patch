@@ -392,10 +392,11 @@ diff --git a/app/src/main/java/com/limelight/binding/video/MediaCodecDecoderRend
                                      break;
                                  default:
                                      break;
-@@ -1446,7 +1507,7 @@
+@@ -1446,7 +1507,8 @@
          if (SystemClock.uptimeMillis() >= activeWindowVideoStats.measurementStartTimestamp + 1000) {
              // Sample the same completed window as the on-screen overlay, even with the UI hidden.
              long windowMs = SystemClock.uptimeMillis() - activeWindowVideoStats.measurementStartTimestamp;
++            perfListener.onRenderedFrameRate(Math.round(activeWindowVideoStats.totalFramesRendered * 1000f / windowMs));
 -            android.util.Log.i("FlashLinkSession", "VIDEO width=" + initialWidth + " height=" + initialHeight
 +            android.util.Log.i("FlashLinkSession", "VIDEO width=" + (presentedSize >>> 16) + " height=" + (presentedSize & 0xffff)
                      + " window_ms=" + windowMs + " received=" + activeWindowVideoStats.totalFramesReceived
@@ -624,10 +625,11 @@ diff --git a/app/src/main/jni/moonlight-core/callbacks.c b/app/src/main/jni/moon
 diff --git a/app/src/main/java/com/limelight/binding/video/PerfOverlayListener.java b/app/src/main/java/com/limelight/binding/video/PerfOverlayListener.java
 --- a/app/src/main/java/com/limelight/binding/video/PerfOverlayListener.java
 +++ b/app/src/main/java/com/limelight/binding/video/PerfOverlayListener.java
-@@ -1,6 +1,8 @@
+@@ -1,6 +1,9 @@
  package com.limelight.binding.video;
  
  public interface PerfOverlayListener {
++    default void onRenderedFrameRate(int fps) {}
 +    void onStreamSizeChanged(int width, int height);
 +    void onOversizedStreamFrame(int size);
      void onFirstFrameSubmitted(int width, int height, int fps);

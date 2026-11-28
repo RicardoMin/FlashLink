@@ -28,12 +28,15 @@ public final class FlashLinkGame extends Game {
     static final int NETWORK_LOST = RESULT_FIRST_USER + 1;
     static final int EXPIRED = RESULT_FIRST_USER + 2;
     static final String LOG = "FlashLinkSession";
+    private static final String SHOW_STATUS = "flashlink_stream_status";
     private final Handler timer = new Handler();
     private final Runnable expire = () -> endWith(EXPIRED, 0);
     private long recoveryDeadline;
     private long startedAt;
     private boolean foreground;
     private FlashLinkStreamTools tools;
+    private volatile FlashLinkStreamStatus streamStatus;
+    private boolean poorConnection;
     private FlashLinkStreamTouch streamTouch;
     private FlashLinkPrivacyLease privacyLease;
     private AndroidAudioRenderer audioRenderer;
@@ -119,7 +122,7 @@ public final class FlashLinkGame extends Game {
     }
 
     private void onSettingResult(boolean fps, FlashLinkLiveSetting.Result result, int value) {
-        String label = fps ? "帧率" : "目标码率";
+        String label = fps ? "帧率" : "画质";
         boolean applied = result == FlashLinkLiveSetting.Result.APPLIED;
         if (value > 0 && activeQuality != null) {
             if (fps) {
@@ -246,14 +249,47 @@ public final class FlashLinkGame extends Game {
 
     private void streamReady() {
         if (startedAt == 0 || activeQuality == null || tools != null || isFinishing() || isDestroyed()) return;
+        streamStatus = new FlashLinkStreamStatus(this);
+        streamStatus.setPoorConnection(poorConnection);
+        refreshStatusOverlay();
         tools = new FlashLinkStreamTools(this);
         tools.attach();
+        tools.setVisible(!isInPictureInPictureMode());
         liveBitrate.probe();
         liveFps.probe();
         liveSize.probe();
     }
 
     FlashLinkQuality currentQuality() { return activeQuality; }
+
+    boolean isStatusOverlayEnabled() {
+        return PreferenceManager.getDefaultSharedPreferences(this).getBoolean(SHOW_STATUS, false);
+    }
+
+    void setStatusOverlayEnabled(boolean enabled) {
+        PreferenceManager.getDefaultSharedPreferences(this).edit().putBoolean(SHOW_STATUS, enabled).apply();
+        refreshStatusOverlay();
+    }
+
+    private void refreshStatusOverlay() {
+        if (streamStatus != null) {
+            streamStatus.setShown(foreground && !isInPictureInPictureMode() && isStatusOverlayEnabled());
+        }
+    }
+
+    @Override public void onRenderedFrameRate(int fps) {
+        FlashLinkStreamStatus status = streamStatus;
+        if (status != null) status.onSample(fps);
+    }
+
+    @Override public void connectionStatusUpdate(int connectionStatus) {
+        super.connectionStatusUpdate(connectionStatus);
+        runOnUiThread(() -> {
+            poorConnection = connectionStatus == MoonBridge.CONN_STATUS_POOR;
+            if (streamStatus != null) streamStatus.setPoorConnection(poorConnection);
+        });
+    }
+
     String liveQualityRestriction(FlashLinkQuality selected) {
         boolean resize = selected.width != activeQuality.width || selected.height != activeQuality.height;
         if ((resize && liveSize.state() != FlashLinkLiveSetting.State.READY) ||
@@ -266,7 +302,7 @@ public final class FlashLinkGame extends Game {
             return "当前解码器无法在播放中切换至所选分辨率和帧率。";
         }
         if (!FlashLinkLiveSetting.Kind.FRAME_RATE.valid(selected.fps) && selected.fps != activeQuality.fps) {
-            return "当前串流支持的帧率范围为 1–240 FPS。";
+            return "当前串流支持的帧率范围为 1–240帧。";
         }
         return null;
     }
@@ -317,6 +353,10 @@ public final class FlashLinkGame extends Game {
     @Override public void connectionTerminated(int code) {
         runOnUiThread(() -> {
             if (isFinishing() || isDestroyed()) return;
+            if (streamStatus != null) {
+                streamStatus.setShown(false);
+                streamStatus = null;
+            }
             releaseControls();
             closeLiveSettings();
             closeLease(!FlashLinkReconnect.transportLost(code));
@@ -471,6 +511,7 @@ public final class FlashLinkGame extends Game {
     @Override protected void onResume() {
         super.onResume();
         foreground = true;
+        refreshStatusOverlay();
         prepareSurface();
     }
     @Override public void onWindowFocusChanged(boolean focus) {
@@ -479,6 +520,7 @@ public final class FlashLinkGame extends Game {
     }
     @Override protected void onPause() {
         foreground = false;
+        refreshStatusOverlay();
         if (pendingSurface != null) closeLease(false);
         releaseControls();
         super.onPause();
@@ -491,6 +533,7 @@ public final class FlashLinkGame extends Game {
         super.onPictureInPictureModeChanged(active, config);
         if (active) releaseControls();
         if (tools != null && Build.VERSION.SDK_INT >= 26) tools.setVisible(!active);
+        refreshStatusOverlay();
     }
     private void closeLease(boolean ended) {
         if (privacyLease != null) {

@@ -10,7 +10,16 @@ public final class FlashLinkQualityTest {
         assert !previous.equals(new FlashLinkQuality(2280, 1080, 59, 12000));
         assert !previous.equals(new FlashLinkQuality(2280, 1080, 60, 12500));
         assert !previous.equals(new FlashLinkQuality(1920, 1080, 59, 12500));
-        assert previous.displayText().equals("2280 × 1080 · 59 FPS · 12.5 Mbps");
+        assert previous.preset() == FlashLinkQuality.Preset.CUSTOM;
+        assert previous.displayText().equals("自定义（12.5 Mbps） · 2280 × 1080 · 59帧");
+        for (FlashLinkQuality.Preset preset : FlashLinkQuality.Preset.values()) {
+            if (preset == FlashLinkQuality.Preset.CUSTOM) continue;
+            FlashLinkQuality selected = new FlashLinkQuality(previous.width, previous.height, previous.fps, preset.kbps);
+            assert selected.preset() == preset;
+            assert selected.presetLabel().equals(preset.label);
+            assert previous.nextChange(selected) == FlashLinkLiveSetting.Kind.BITRATE;
+        }
+        assert new FlashLinkQuality(1920, 1080, 60, 20001).preset() == FlashLinkQuality.Preset.CUSTOM;
         FlashLinkQuality frameRate = new FlashLinkQuality(2280, 1080, 30, 12500);
         FlashLinkQuality bitrate = new FlashLinkQuality(2280, 1080, 59, 15000);
         assert previous.nextChange(frameRate) == FlashLinkLiveSetting.Kind.FRAME_RATE;

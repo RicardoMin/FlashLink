@@ -2,9 +2,12 @@
 package com.limelight;
 
 import android.app.AlertDialog;
+import android.content.res.ColorStateList;
 import android.graphics.Color;
 import android.graphics.Typeface;
+import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.RippleDrawable;
 import android.os.SystemClock;
 import android.view.Gravity;
 import android.view.KeyEvent;
@@ -16,97 +19,81 @@ import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.Switch;
 import android.widget.TextView;
 
 import com.limelight.binding.input.evdev.EvdevListener;
 
-/** Native controls overlay. The game surface remains responsible for every touch outside the controls. */
+/** In-session controls, opened from a single docked button. */
 final class FlashLinkStreamTools {
     private static final int WRAP = -2, MATCH = -1;
+    private static final int INK = 0xfff2f6fd, MUTED = 0xffbfcee0, ACCENT = 0xffa6cdff;
+    private static final int TILE = 0xff293749;
+    private enum Page { HOME, MOUSE, KEYS }
     private final FlashLinkGame game;
-    private final FrameLayout layer;
+    private final FlashLinkControlDock layer;
     private final LinearLayout panel;
     private final ScrollView sheet;
-    private TextView mouseTab, modeTab, toolsTab, resetTab, dragButton;
-    private boolean mouseOpen, drag;
+    private TextView resetButton, dragButton;
+    private boolean zoomed, drag;
     private float lastX, lastY;
     private int trackingPointer = -1;
 
     FlashLinkStreamTools(FlashLinkGame game) {
         this.game = game;
-        layer = new FrameLayout(game);
         panel = new LinearLayout(game);
         panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(12), dp(6), dp(12), dp(6));
         sheet = new ScrollView(game);
+        sheet.setBackground(shape(0xf51a2433, 18));
+        sheet.setClipToOutline(true);
+        sheet.setFillViewport(false);
+        sheet.setClickable(true);
+        sheet.addView(panel);
+        layer = new FlashLinkControlDock(game, sheet, () -> {
+            if (!collapse()) open(Page.HOME);
+        }, this::collapse);
     }
 
     void attach() {
         game.addContentView(layer, new FrameLayout.LayoutParams(MATCH, MATCH));
-        mouseTab = tab("鼠标", Gravity.START, 56, () -> toggle(true));
-        modeTab = tab("", Gravity.CENTER_HORIZONTAL, 96, () -> {
-            game.toggleTouchMode();
-            updateModeTab();
-        });
-        updateModeTab();
-        toolsTab = tab("工具", Gravity.END, 56, () -> toggle(false));
-        resetTab = button("复位视图", game::resetViewport);
-        resetTab.setVisibility(View.GONE);
-        FrameLayout.LayoutParams resetPosition = new FrameLayout.LayoutParams(dp(96), dp(42),
-                Gravity.BOTTOM | Gravity.END);
-        resetPosition.setMargins(dp(12), 0, dp(12), dp(12));
-        layer.addView(resetTab, resetPosition);
-        sheet.setBackground(shape(0xeb172332, 16));
-        sheet.setFillViewport(false);
-        sheet.setVisibility(View.GONE);
-        int pad = dp(7);
-        sheet.setPadding(pad, pad, pad, pad);
-        sheet.setClickable(true);
-        sheet.addView(panel);
-        layer.addView(sheet);
-    }
-
-    private void updateModeTab() {
-        boolean trackpad = game.isTouchscreenTrackpad();
-        modeTab.setText(trackpad ? "触控板模式" : "直接触控");
-        modeTab.setContentDescription(trackpad ? "触控板模式，点按切换为直接触控" : "直接触控，点按切换为触控板模式");
     }
 
     void showViewReset(boolean zoomed) {
-        resetTab.setVisibility(zoomed ? View.VISIBLE : View.GONE);
+        this.zoomed = zoomed;
+        if (resetButton != null) {
+            resetButton.setEnabled(zoomed);
+            resetButton.setAlpha(zoomed ? 1f : 0.45f);
+        }
     }
 
-    private TextView tab(String label, int edge, int width, Runnable action) {
-        TextView v = button(label, action);
-        v.setBackground(shape(0xbf192635, 24));
-        FrameLayout.LayoutParams p = new FrameLayout.LayoutParams(dp(width), dp(42), Gravity.TOP | edge);
-        p.setMargins(dp(12), dp(12), dp(12), 0);
-        layer.addView(v, p);
-        return v;
-    }
-
-    private void toggle(boolean mouse) {
-        boolean close = sheet.getVisibility() == View.VISIBLE && mouseOpen == mouse;
-        collapse();
-        if (close) return;
-        mouseOpen = mouse;
+    private void open(Page page) {
+        game.cancelTouchscreenInput();
+        release();
         panel.removeAllViews();
-        if (mouse) mousePanel(); else keyPanel();
-        int height = Math.min(dp(mouse ? 245 : 269), Math.max(dp(96), layer.getHeight() - dp(74)));
-        FrameLayout.LayoutParams p = new FrameLayout.LayoutParams(Math.min(dp(mouse ? 240 : 282), layer.getWidth() - dp(24)),
-                height, Gravity.TOP | (mouse ? Gravity.START : Gravity.END));
-        p.setMargins(dp(12), dp(60), dp(12), dp(8));
-        sheet.setLayoutParams(p);
+        resetButton = null;
+        LinearLayout header = row();
+        if (page != Page.HOME) {
+            TextView back = button("‹", () -> open(Page.HOME));
+            back.setTextSize(24);
+            back.setContentDescription("返回控制中心");
+            header.addView(back, new LinearLayout.LayoutParams(dp(48), dp(48)));
+        }
+        TextView title = label(page == Page.MOUSE ? "虚拟鼠标" : page == Page.KEYS ? "快捷键" : "控制中心", 18, INK);
+        title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        title.setPadding(dp(6), 0, 0, 0);
+        header.addView(title, new LinearLayout.LayoutParams(WRAP, dp(48)));
+        if (page == Page.HOME) homePanel();
+        else if (page == Page.MOUSE) mousePanel();
+        else keyPanel();
+        layer.setPanelOpen(true);
         sheet.scrollTo(0, 0);
-        sheet.setVisibility(View.VISIBLE);
-        (mouse ? mouseTab : toolsTab).setText("收起");
     }
 
     boolean collapse() {
         if (sheet.getVisibility() != View.VISIBLE) return false;
         release();
-        sheet.setVisibility(View.GONE);
-        mouseTab.setText("鼠标");
-        toolsTab.setText("工具");
+        layer.setPanelOpen(false);
         return true;
     }
 
@@ -122,6 +109,84 @@ final class FlashLinkStreamTools {
             drag = false;
             dragButton.setText("拖动");
         }
+    }
+
+    private void homePanel() {
+        LinearLayout first = row();
+        primary(first, "触控模式", game.isTouchscreenTrackpad() ? "触控板" : "直接触控", R.drawable.fl_touch, () -> {
+            game.toggleTouchMode();
+            collapse();
+        });
+        FlashLinkQuality quality = game.currentQuality();
+        if (quality != null) primary(first, "画面设置", quality.presetLabel(), R.drawable.fl_display, () -> {
+            collapse();
+            game.showQualitySettings();
+        });
+
+        LinearLayout actions = row();
+        tool(actions, "虚拟鼠标", R.drawable.fl_mouse, () -> open(Page.MOUSE));
+        tool(actions, "快捷键", R.drawable.fl_keys, () -> open(Page.KEYS));
+        tool(actions, "系统键盘", R.drawable.fl_keyboard, () -> { collapse(); game.toggleKeyboard(); });
+        actions = row();
+        tool(actions, "输入文字", R.drawable.fl_text, this::textDialog);
+        tool(actions, "声音", R.drawable.fl_sound, () -> { collapse(); FlashLinkAudio.show(game); });
+        resetButton = tool(actions, "复位视图", R.drawable.fl_fit, () -> { game.resetViewport(); collapse(); });
+        showViewReset(zoomed);
+
+        View divider = new View(game);
+        divider.setBackgroundColor(0xff3b495a);
+        LinearLayout.LayoutParams rule = new LinearLayout.LayoutParams(MATCH, dp(1));
+        rule.setMargins(dp(3), dp(7), dp(3), 0);
+        panel.addView(divider, rule);
+        LinearLayout footer = row();
+        Switch status = new Switch(game);
+        status.setText("串流状态");
+        status.setTextColor(INK);
+        status.setTextSize(14);
+        status.setPadding(dp(4), 0, dp(8), 0);
+        status.setChecked(game.isStatusOverlayEnabled());
+        status.setOnCheckedChangeListener((v, enabled) -> game.setStatusOverlayEnabled(enabled));
+        footer.addView(status, new LinearLayout.LayoutParams(0, dp(48), 1f));
+        TextView leave = button("断开连接", game::leaveStream);
+        leave.setTextColor(0xffffb7b2);
+        leave.setBackground(new RippleDrawable(ColorStateList.valueOf(0x33445566), null, shape(Color.WHITE, 8)));
+        footer.addView(leave, new LinearLayout.LayoutParams(dp(76), dp(48)));
+    }
+
+    private void primary(LinearLayout row, String title, String value, int icon, Runnable action) {
+        LinearLayout tile = new LinearLayout(game);
+        tile.setOrientation(LinearLayout.VERTICAL);
+        tile.setGravity(Gravity.CENTER_VERTICAL);
+        tile.setPadding(dp(10), dp(6), dp(6), dp(6));
+        tile.setBackground(tileBackground(0xff304861));
+        tile.setFocusable(true);
+        tile.setContentDescription(title + "，" + value);
+        tile.setOnClickListener(v -> action.run());
+        TextView name = label(title, 13, MUTED);
+        name.setCompoundDrawablesRelative(icon(icon, 16, ACCENT), null, null, null);
+        name.setCompoundDrawablePadding(dp(5));
+        tile.addView(name);
+        TextView selection = label(value, 16, INK);
+        selection.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        tile.addView(selection);
+        addCell(row, tile, 62);
+    }
+
+    private TextView tool(LinearLayout row, String title, int icon, Runnable action) {
+        TextView view = button(title, action);
+        view.setTextSize(12);
+        view.setPadding(0, dp(7), 0, dp(5));
+        view.setCompoundDrawables(null, icon(icon, 20, MUTED), null, null);
+        view.setCompoundDrawablePadding(dp(2));
+        addCell(row, view, 52);
+        return view;
+    }
+
+    private Drawable icon(int resource, int size, int tint) {
+        Drawable icon = game.getDrawable(resource).mutate();
+        icon.setBounds(0, 0, dp(size), dp(size));
+        icon.setTint(tint);
+        return icon;
     }
 
     private void mousePanel() {
@@ -183,27 +248,13 @@ final class FlashLinkStreamTools {
     }
 
     private void keyPanel() {
-        FlashLinkQuality active = game.currentQuality();
-        if (active != null) {
-            TextView quality = button("串流画质\n" + active.displayText(), () -> {
-                collapse();
-                game.showQualitySettings();
-            });
-            panel.addView(quality, new LinearLayout.LayoutParams(MATCH, dp(60)));
-        }
         LinearLayout row = row();
-        item(row, "串流声音", () -> { collapse(); FlashLinkAudio.show(game); });
-        row = row();
         item(row, "空格", () -> key(KeyEvent.KEYCODE_SPACE));
         item(row, "回车", () -> key(KeyEvent.KEYCODE_ENTER));
         item(row, "Esc", () -> key(KeyEvent.KEYCODE_ESCAPE));
         row = row();
         item(row, "上一页", () -> key(KeyEvent.KEYCODE_PAGE_UP));
         item(row, "下一页", () -> key(KeyEvent.KEYCODE_PAGE_DOWN));
-        row = row();
-        item(row, "输入文字", this::textDialog);
-        item(row, "系统键盘", () -> { collapse(); game.toggleKeyboard(); });
-        item(row(), "断开连接", game::leaveStream);
     }
 
     private void key(int code) {
@@ -246,23 +297,37 @@ final class FlashLinkStreamTools {
 
     private TextView item(LinearLayout row, String label, Runnable action) {
         TextView view = button(label, action);
-        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, dp(42), 1f);
-        p.setMargins(dp(2), dp(2), dp(2), dp(2));
-        row.addView(view, p);
+        addCell(row, view, 48);
         return view;
     }
 
-    private TextView button(String label, Runnable action) {
+    private void addCell(LinearLayout row, View view, int minimumHeight) {
+        view.setMinimumHeight(dp(minimumHeight));
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, WRAP, 1f);
+        p.setMargins(dp(2), dp(2), dp(2), dp(2));
+        row.addView(view, p);
+    }
+
+    private TextView label(String text, int size, int color) {
         TextView view = new TextView(game);
-        view.setText(label);
+        view.setText(text);
+        view.setGravity(Gravity.CENTER_VERTICAL);
+        view.setTextColor(color);
+        view.setTextSize(size);
+        return view;
+    }
+
+    private TextView button(String text, Runnable action) {
+        TextView view = label(text, 14, INK);
         view.setGravity(Gravity.CENTER);
-        view.setTextColor(Color.WHITE);
-        view.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        view.setTextSize(14);
-        view.setBackground(shape(0xff29394a, 9));
+        view.setBackground(tileBackground(TILE));
         view.setOnClickListener(v -> action.run());
         view.setFocusable(true);
         return view;
+    }
+
+    private RippleDrawable tileBackground(int color) {
+        return new RippleDrawable(ColorStateList.valueOf(0x448cc2ff), shape(color, 10), null);
     }
 
     private GradientDrawable shape(int color, int radius) {
