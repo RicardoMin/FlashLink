@@ -163,6 +163,7 @@ mod windows {
         fn flashlink_audio_get_mute(id: *const u16, muted: *mut i32) -> i32;
         fn flashlink_audio_set(id: *const u16, percent: i32, muted: i32) -> i32;
         fn flashlink_media_active(engine_pid: u32, audio_port: u16) -> i32;
+        fn flashlink_media_idle(engine_pid: u32, audio_port: u16) -> i32;
     }
 
     fn checked(hr: i32) -> io::Result<()> {
@@ -267,6 +268,10 @@ mod windows {
 
         pub fn poll(&mut self) {
             self.update(false);
+        }
+
+        pub fn media_idle(&self) -> bool {
+            unsafe { flashlink_media_idle(self.engine_pid, self.audio_port) != 0 }
         }
     }
 

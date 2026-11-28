@@ -23,6 +23,8 @@ jobs:
           persist-credentials: false
       - name: Run workspace tests on Windows
         run: cargo test --locked --workspace
+      - name: Test Windows update and rollback
+        run: python -m unittest discover -s release -p test_windows_install.py
       - name: Set up the Sunshine toolchain
         uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2.32.0
         with:

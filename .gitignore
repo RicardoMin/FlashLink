@@ -17,6 +17,7 @@ key.json
 *.jks
 *.keystore
 *.p12
+update-private.pem
 
 # Host identity and pairing data when a custom state directory is in the checkout
 flashlink-key.pem

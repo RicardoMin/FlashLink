@@ -7,7 +7,7 @@
 
 namespace {
 template <typename Table>
-bool owns_udp_port(ULONG family, DWORD pid, unsigned short port) {
+int owns_udp_port(ULONG family, DWORD pid, unsigned short port) {
     // DWORD storage gives both IP Helper table layouts their required alignment.
     std::vector<DWORD> storage(128);
     for (;;) {
@@ -17,7 +17,7 @@ bool owns_udp_port(ULONG family, DWORD pid, unsigned short port) {
             storage.resize((bytes + sizeof(DWORD) - 1) / sizeof(DWORD));
             continue;
         }
-        if (result != NO_ERROR) return false;
+        if (result != NO_ERROR) return -1;
         const auto* table = reinterpret_cast<const Table*>(storage.data());
         for (DWORD i = 0; i < table->dwNumEntries; ++i) {
             const auto& row = table->table[i];
@@ -29,6 +29,12 @@ bool owns_udp_port(ULONG family, DWORD pid, unsigned short port) {
 }
 
 extern "C" BOOL flashlink_media_active(DWORD engine_pid, unsigned short audio_port) {
-    return owns_udp_port<MIB_UDPTABLE_OWNER_PID>(AF_INET, engine_pid, audio_port)
-        || owns_udp_port<MIB_UDP6TABLE_OWNER_PID>(AF_INET6, engine_pid, audio_port);
+    return owns_udp_port<MIB_UDPTABLE_OWNER_PID>(AF_INET, engine_pid, audio_port) == 1
+        || owns_udp_port<MIB_UDP6TABLE_OWNER_PID>(AF_INET6, engine_pid, audio_port) == 1;
+}
+
+// Updating requires positive confirmation that the transport is idle.
+extern "C" BOOL flashlink_media_idle(DWORD engine_pid, unsigned short audio_port) {
+    return owns_udp_port<MIB_UDPTABLE_OWNER_PID>(AF_INET, engine_pid, audio_port) == 0
+        && owns_udp_port<MIB_UDP6TABLE_OWNER_PID>(AF_INET6, engine_pid, audio_port) == 0;
 }

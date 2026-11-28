@@ -329,6 +329,13 @@ impl Nearby {
             .map(|(_, ts)| ts)
     }
 
+    #[cfg(windows)]
+    pub fn may_resume(&self) -> bool {
+        self.streams
+            .lock()
+            .map_or(true, |s| s.may_resume(Instant::now()))
+    }
+
     pub fn apply_audio(
         &self,
         now: Instant,

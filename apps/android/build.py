@@ -90,6 +90,7 @@ def prepare(output, origin):
     shutil.copy2(ROOT / "LICENSES/FlashLink-MIT.txt", assets)
     shutil.copy2(host / "LICENSE.txt", assets / "Moonlight-GPLv3.txt")
     shutil.copy2(ANDROID / "NOTICE.txt", assets / "FlashLink-Moonlight.txt")
+    shutil.copy2(ROOT / "release/update-key.der", assets.parent / "flashlink-update-key.der")
     return host
 
 
@@ -188,7 +189,9 @@ def build(output, host, signing_config=None, official=False):
     artifact, aar = flutter_artifact(repo)
     gradle = host / ("gradlew.bat" if os.name == "nt" else "gradlew")
     variant = "release" if signing_config else "debug"
+    product = json.loads((ROOT / "release/versions.json").read_text(encoding="utf-8"))["android"]
     run([gradle, f":app:assembleNonRoot{variant.title()}", f"-PflashlinkNdkVersion={version}",
+         f"-PflashlinkVersionName={product['version']}", f"-PflashlinkVersionCode={product['build']}",
          f"-PflashlinkJavaSrc={ANDROID / 'src/main/java'}",
          f"-PflashlinkFlutterArtifact={artifact}", f"-PflashlinkFlutterRepo={repo}"], host)
     suffix = "-unsigned" if signing_config else ""
@@ -198,6 +201,8 @@ def build(output, host, signing_config=None, official=False):
         missing = [name for name in required if f"lib/arm64-v8a/{name}" not in package.namelist()]
         if missing:
             raise ValueError("Incomplete APK. Missing native libraries: " + ", ".join(missing))
+        if package.read("assets/flashlink-update-key.der") != (ROOT / "release/update-key.der").read_bytes():
+            raise ValueError("APK update verification key does not match this release")
         check_flutter_payload(compiler, aar, package)
     destination = output / f"flashlink-arm64-{variant}.apk"
     if signing_config:
