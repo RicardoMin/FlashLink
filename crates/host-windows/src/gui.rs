@@ -347,9 +347,20 @@ pub fn window(options: Options) -> Result<(), String> {
         (desktop_menu::REPORT, "导出测试报告", 227),
         (LOG, "查看日志", 272),
         (LICENSES, "开源许可", 317),
+        (desktop_menu::UPDATE, "检查更新", 362),
     ] {
         child(main, "BUTTON", label, id, (16, y, 146, 34), &normal);
     }
+    let update_text = child(
+        main,
+        "STATIC",
+        "",
+        RAIL_LABEL as _,
+        (16, 408, 152, 52),
+        &small,
+    );
+    let mut last_update_status = "";
+    let mut failed_host_reservation = None;
     child(
         main,
         "STATIC",
@@ -361,7 +372,10 @@ pub fn window(options: Options) -> Result<(), String> {
     child(
         main,
         "STATIC",
-        "Windows  ·  局域网被控端",
+        &format!(
+            "Windows  ·  局域网被控端  ·  {}",
+            flashlink_update::WINDOWS_VERSION
+        ),
         PAGE_SUBTITLE as _,
         (205, 60, 488, 24),
         &small,
@@ -491,6 +505,11 @@ pub fn window(options: Options) -> Result<(), String> {
     let (fw_tx, fw_rx) = mpsc::channel::<String>();
     let (report_tx, report_rx) = mpsc::channel::<Result<String, String>>();
     let mut exporting = false;
+    let mut updater = crate::host_update::Client::new();
+    let mut update_idle = false;
+    let mut next_idle_probe = std::time::Instant::now();
+    let mut handoff = false;
+    let mut testing_startup = std::env::var_os("FLASHLINK_UPDATE_BOOT").is_some();
     unsafe {
         SetTimer(main, 1, 150, None);
     }
@@ -504,6 +523,11 @@ pub fn window(options: Options) -> Result<(), String> {
         }
         for event in event_rx.try_iter() {
             match event {
+                Event::UpdateIdle(idle) => update_idle = idle,
+                Event::StoppedForUpdate => {
+                    handoff = true;
+                    break 'events;
+                }
                 Event::Devices(Ok(devices)) if !devices.is_empty() => {
                     desktop_menu::show(main);
                     if let Some(id) = desktop_menu::select_device(main, &devices) {
@@ -513,6 +537,11 @@ pub fn window(options: Options) -> Result<(), String> {
                 Event::Devices(Ok(_)) => notice("当前没有已授权的安卓设备。"),
                 Event::Devices(Err(error)) => notice(&error),
                 Event::Paused(state) => {
+                    update_idle = false;
+                    if testing_startup {
+                        crate::host_update::acknowledge_startup();
+                        testing_startup = false;
+                    }
                     use crate::privacy_time::Desktop;
                     connection = None;
                     pending = None;
@@ -539,6 +568,10 @@ pub fn window(options: Options) -> Result<(), String> {
                     );
                 }
                 Event::Online { base, exe, address } => {
+                    if testing_startup {
+                        crate::host_update::acknowledge_startup();
+                        testing_startup = false;
+                    }
                     set_text(phase, "已就绪，等待手机或平板连接");
                     set_text(details,&format!("电脑地址   {address}:{base}\r\n在手机或平板的“我的设备”中选择这台电脑。首次连接时，两端会显示同一个确认码。"));
                     connection = Some((exe, base));
@@ -576,6 +609,11 @@ pub fn window(options: Options) -> Result<(), String> {
                     visible(consent, false);
                 }
                 Event::Failed(text) => {
+                    update_idle = false;
+                    updater.retry_handoff();
+                    if testing_startup {
+                        break 'events;
+                    }
                     connection = None;
                     privacy = PrivacyControl::Busy;
                     privacy_control(main, privacy_button, privacy);
@@ -601,6 +639,34 @@ pub fn window(options: Options) -> Result<(), String> {
                 Err(error) => notice(&format!("无法导出测试报告：{error}")),
             }
         }
+        let stopped = worker.is_finished();
+        if !updater.needs_idle() {
+            update_idle = false;
+        } else if !stopped && std::time::Instant::now() >= next_idle_probe {
+            let _ = commands.send(Action::CheckUpdateIdle);
+            next_idle_probe = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        }
+        if updater.poll(main, (update_idle || stopped) && pending.is_none()) {
+            if stopped {
+                match service::reserve_failed_host(&options) {
+                    Ok(guard) => {
+                        failed_host_reservation = Some(guard);
+                        handoff = true;
+                        break 'events;
+                    }
+                    Err(error) => {
+                        updater.cancel_handoff();
+                        notice(&error);
+                    }
+                }
+            } else {
+                let _ = commands.send(Action::StopForUpdate);
+            }
+        }
+        if updater.status() != last_update_status {
+            last_update_status = updater.status();
+            set_text(update_text, last_update_status);
+        }
         let inputs = INPUT.with(|q| std::mem::take(&mut *q.borrow_mut()));
         for input in inputs {
             match input {
@@ -614,6 +680,12 @@ pub fn window(options: Options) -> Result<(), String> {
                 }
                 Input::Close(w) if w == main => break 'events,
                 Input::Button(desktop_menu::EXIT) => break 'events,
+                Input::Button(desktop_menu::UPDATE) => {
+                    desktop_menu::show(main);
+                    updater.check(true);
+                    set_text(update_text, updater.status());
+                    last_update_status = updater.status();
+                }
                 Input::Button(desktop_menu::REPORT) if !exporting => {
                     if let Ok(dir) = service::profile_dir(&options) {
                         exporting = true;
@@ -735,6 +807,12 @@ pub fn window(options: Options) -> Result<(), String> {
         DestroyWindow(main);
     }
     let _ = worker.join();
+    if handoff {
+        updater
+            .launch()
+            .map_err(|e| format!("启动更新程序失败，请重新打开主机。{e}"))?;
+    }
+    drop(failed_host_reservation);
     Ok(())
 }
 

@@ -13,6 +13,7 @@ pub const EXIT: usize = 2103;
 pub const REPORT: usize = 2104;
 pub const PRIVACY: usize = 2105;
 pub const RESTORE: usize = 2107;
+pub const UPDATE: usize = 2108;
 
 fn add(menu: HMENU, id: usize, title: &str) {
     unsafe { AppendMenuW(menu, MF_STRING, id, wide(title).as_ptr()) };
@@ -26,6 +27,7 @@ pub fn attach_menu(window: HWND) {
         add(actions, RESTORE, "本机恢复显示…");
         add(actions, DEVICES, "管理已授权设备…");
         add(actions, REPORT, "导出测试报告…");
+        add(actions, UPDATE, "检查更新…");
         add(actions, EXIT, "退出主机");
         AppendMenuW(bar, MF_POPUP, actions as usize, wide("主机(&H)").as_ptr());
         SetMenu(window, bar);
@@ -113,6 +115,7 @@ pub fn tray_action(window: HWND) -> usize {
     add(menu, OPEN, "打开 FlashLink");
     add(menu, DEVICES, "管理已授权设备…");
     add(menu, REPORT, "导出测试报告…");
+    add(menu, UPDATE, "检查更新…");
     add(menu, EXIT, "退出主机");
     popup(window, menu)
 }

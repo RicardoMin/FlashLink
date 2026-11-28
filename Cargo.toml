@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/client", "crates/host-windows"]
+members = ["crates/client", "crates/host-windows", "crates/update"]
 
 [workspace.package]
 license = "GPL-3.0-only"

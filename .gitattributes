@@ -1,3 +1,4 @@
 # A unified diff represents an empty context line with one space.
 *.patch text eol=lf whitespace=-blank-at-eol
+*.der binary
 crates/host-windows/build-sunshine.sh text eol=lf

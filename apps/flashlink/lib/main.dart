@@ -266,6 +266,8 @@ class _HomeState extends State<_Home> with WidgetsBindingObserver {
                 onTap: controller.phase == SessionPhase.idle
                     ? () => _showResult(controller.openSettings())
                     : null)),
+        const SizedBox(height: 12),
+        _UpdateEntry(enabled: controller.phase == SessionPhase.idle),
       ]);
     }
     final nearby = controller.nearby;
@@ -357,6 +359,48 @@ class _HomeState extends State<_Home> with WidgetsBindingObserver {
                 list,
             ]));
   }
+}
+
+class _UpdateEntry extends StatefulWidget {
+  const _UpdateEntry({required this.enabled});
+  final bool enabled;
+
+  @override
+  State<_UpdateEntry> createState() => _UpdateEntryState();
+}
+
+class _UpdateEntryState extends State<_UpdateEntry> {
+  static const _channel = MethodChannel('dev.flashlink/player');
+  late final _version = _channel.invokeMethod<String>('appVersion');
+
+  @override
+  Widget build(BuildContext context) => Material(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        clipBehavior: Clip.antiAlias,
+        child: ListTile(
+          leading: const Icon(Icons.system_update_rounded, color: _blue),
+          title: const Text('检查更新'),
+          subtitle: FutureBuilder<String?>(
+              future: _version,
+              builder: (context, value) => Text(value.hasData
+                  ? 'FlashLink ${value.data}'
+                  : 'FlashLink')),
+          trailing: const Icon(Icons.chevron_right),
+          onTap: widget.enabled
+              ? () async {
+                  try {
+                    await _channel.invokeMethod<void>('checkUpdates');
+                  } on PlatformException {
+                    if (context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('无法检查更新，请稍后重试。')));
+                    }
+                  }
+                }
+              : null,
+        ),
+      );
 }
 
 class _Group extends StatelessWidget {

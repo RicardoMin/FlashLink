@@ -32,6 +32,8 @@ jobs:
           cache: true
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
+      - name: Test release manifest preparation
+        run: python3 -m unittest discover -s release -p test_prepare.py
       - name: Run Rust, Flutter and Android tests
         run: python3 test/test_flashlink.py --mode dev
       - name: Upload test report

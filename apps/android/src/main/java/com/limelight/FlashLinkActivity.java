@@ -29,6 +29,7 @@ public final class FlashLinkActivity extends FlutterActivity {
     private static final String PROCESS_TOKEN = UUID.randomUUID().toString();
     private MethodChannel.Result pendingLaunch;
     private long attemptId;
+    private FlashLinkUpdates updates;
 
     private static native void releaseRecoveredAttempt(long id);
 
@@ -38,6 +39,7 @@ public final class FlashLinkActivity extends FlutterActivity {
             attemptId = savedInstanceState.getLong(SAVED_ATTEMPT);
         }
         super.onCreate(savedInstanceState);
+        updates = new FlashLinkUpdates(this, savedInstanceState);
         seedDisplayResolution();
     }
 
@@ -64,6 +66,24 @@ public final class FlashLinkActivity extends FlutterActivity {
         super.onSaveInstanceState(state);
         state.putLong(SAVED_ATTEMPT, attemptId);
         state.putString(SAVED_PROCESS, PROCESS_TOKEN);
+        updates.save(state);
+    }
+
+    boolean playerOpen() { return attemptId != 0; }
+
+    @Override public void onPostResume() {
+        super.onPostResume();
+        updates.onResume();
+    }
+
+    @Override protected void onPause() {
+        updates.onPause();
+        super.onPause();
+    }
+
+    @Override protected void onDestroy() {
+        updates.destroy();
+        super.onDestroy();
     }
 
     @Override
@@ -72,6 +92,15 @@ public final class FlashLinkActivity extends FlutterActivity {
         MethodChannel channel = new MethodChannel(
                 engine.getDartExecutor().getBinaryMessenger(), "dev.flashlink/player");
         channel.setMethodCallHandler((call, result) -> {
+            if (call.method.equals("appVersion")) {
+                result.success(updates.version());
+                return;
+            }
+            if (call.method.equals("checkUpdates")) {
+                updates.check(true);
+                result.success(null);
+                return;
+            }
             if (call.method.equals("discover")) {
                 new Thread(() -> {
                     try {
@@ -154,6 +183,10 @@ public final class FlashLinkActivity extends FlutterActivity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == FlashLinkUpdates.ALLOW_SOURCE) {
+            updates.permissionResult();
+            return;
+        }
         if (requestCode != PLAYER_REQUEST || attemptId == 0) {
             return;
         }

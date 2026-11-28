@@ -154,6 +154,19 @@ pub(super) struct Streams {
 }
 
 impl Streams {
+    #[cfg(windows)]
+    pub(super) fn may_resume(&self, now: Instant) -> bool {
+        let grace = Duration::from_secs(20);
+        self.preparing
+            .as_ref()
+            .is_some_and(|p| now.duration_since(p.session.last_seen) < PREPARE_TIMEOUT)
+            || self
+                .audio
+                .is_some_and(|s| !s.ended && now.duration_since(s.last_seen) < grace)
+            || self
+                .heartbeat
+                .is_some_and(|(_, seen)| now.duration_since(seen) < grace)
+    }
     pub(super) fn legacy(&mut self, owner: [u8; 32], now: Instant) {
         // A v1 heartbeat carries no audio policy and cannot finalize a v2 session.
         if self

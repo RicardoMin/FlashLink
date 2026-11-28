@@ -24,8 +24,8 @@ index 9d13f4b..d04243e 100644
  
 -        versionName "12.1"
 -        versionCode = 314
-+        versionName "0.3.0-demo"
-+        versionCode = 316
++        versionName project.property("flashlinkVersionName") + "-dev"
++        versionCode = project.property("flashlinkVersionCode").toInteger()
  
          // Generate native debug symbols to allow Google Play to symbolicate our native crashes
          ndk.debugSymbolLevel = 'FULL'
@@ -60,7 +60,7 @@ index 9d13f4b..d04243e 100644
              resValue "string", "app_label_root", "Moonlight (Root)"
  
              minifyEnabled true
-@@ -136,6 +137,18 @@ android {
+@@ -136,6 +137,19 @@ android {
  }
  
 +androidComponents.onVariants(androidComponents.selector().withBuildType('release')) { variant ->
@@ -68,14 +68,15 @@ index 9d13f4b..d04243e 100644
 +    if (variant.name == 'nonRootRelease') {
 +        variant.applicationId.set('io.github.ricardomin.flashlink')
 +        variant.outputs.each { output ->
-+            output.versionName.set('0.3.2')
-+            output.versionCode.set(319)
++            output.versionName.set(project.property("flashlinkVersionName").toString())
++            output.versionCode.set(project.property("flashlinkVersionCode").toInteger())
 +        }
 +    }
 +}
 +
  dependencies {
 +    implementation project.property('flashlinkFlutterArtifact')
++    implementation 'androidx.core:core:1.13.1'
      implementation 'org.bouncycastle:bcprov-jdk15on:1.70'
      implementation 'org.bouncycastle:bcpkix-jdk15on:1.70'
      implementation 'org.jcodec:jcodec:0.2.3'
@@ -83,11 +84,24 @@ diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
 index 7be9a20..4e5f545 100644
 --- a/app/src/main/AndroidManifest.xml
 +++ b/app/src/main/AndroidManifest.xml
-@@ -82,12 +82,31 @@
+@@ -3,4 +3,5 @@
+ 
+     <uses-permission android:name="android.permission.INTERNET" />
++    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+     <uses-permission android:name="android.permission.VIBRATE" />
+@@ -82,12 +83,38 @@
              android:name="android.game_mode_config"
              android:resource="@xml/game_mode_config" />
  
 +        <meta-data android:name="flutterEmbedding" android:value="2" />
++        <provider android:name="androidx.core.content.FileProvider"
++            android:authorities="${applicationId}.updates"
++            android:exported="false"
++            android:grantUriPermissions="true">
++            <meta-data android:name="android.support.FILE_PROVIDER_PATHS"
++                android:resource="@xml/flashlink_update_paths" />
++        </provider>
 +        <activity
 +            android:name=".FlashLinkActivity"
 +            android:exported="true"

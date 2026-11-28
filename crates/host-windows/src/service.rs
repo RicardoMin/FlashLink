@@ -20,6 +20,8 @@ use std::{
 };
 
 pub enum Event {
+    UpdateIdle(bool),
+    StoppedForUpdate,
     Paused(Desktop),
     Privacy(PrivacyControl, String),
     Devices(Result<Vec<super::management::PairedDevice>, String>),
@@ -39,6 +41,8 @@ pub enum Event {
     Failed(String),
 }
 pub enum Action {
+    CheckUpdateIdle,
+    StopForUpdate,
     SetPrivacy(bool),
     ListDevices,
     Revoke(String),
@@ -131,6 +135,31 @@ pub fn profile_dir(options: &Options) -> Result<PathBuf, String> {
             env::var_os("LOCALAPPDATA").map(|p| PathBuf::from(p).join("FlashLink").join("DemoHost"))
         })
         .ok_or_else(|| "找不到当前 Windows 用户目录".into())
+}
+
+/// A failed startup may have been caused by another host. Hold the same profile and discovery
+/// locks as a running host while handing the verified package to the installer.
+pub fn reserve_failed_host(options: &Options) -> Result<(fs::File, UdpSocket), String> {
+    let dir = profile_dir(options)?;
+    if super::privacy::locked() != Some(false)
+        || !matches!(dir.join(super::privacy::MARKER).try_exists(), Ok(false))
+    {
+        return Err("请解锁 Windows 并完成防窥显示恢复，再检查更新。".into());
+    }
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.join("flashlink-demo.lock"))
+        .map_err(|e| e.to_string())?;
+    lock.try_lock()
+        .map_err(|_| "另一台主机进程仍在运行，请在它的主机菜单中检查更新。")?;
+    let socket = UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, super::lan::DISCOVERY_PORT))
+        .map_err(|_| "附近发现端口正在使用，请关闭其他主机实例后重新检查更新。")?;
+    super::check_ports(options.port.unwrap_or(47989))?;
+    Ok((lock, socket))
 }
 
 pub fn serve(
@@ -326,6 +355,7 @@ fn run_engine(
     let mut guard: Option<super::privacy::Guard> = None;
     let mut guard_outcome = None;
     let mut requested_owner: Option<[u8; 32]> = None;
+    let mut last_media = None;
     loop {
         if let Some(owner) = setup.poll(&mut requested_owner, ui) {
             let result =
@@ -416,7 +446,10 @@ fn run_engine(
                 log_note(&profile.log)
             ));
         }
-        match commands.recv_timeout(Duration::from_millis(150)) {
+        let command = commands.recv_timeout(Duration::from_millis(150));
+        let stopping_for_update = matches!(&command, Ok(Action::StopForUpdate));
+        let check_update = stopping_for_update || matches!(&command, Ok(Action::CheckUpdateIdle));
+        match command {
             Ok(Action::SetPrivacy(false)) => {
                 if let Some(g) = guard.as_mut() {
                     let _ = ui.send(Event::Privacy(
@@ -487,7 +520,7 @@ fn run_engine(
             }
             _ => {}
         }
-        if Instant::now() < next_poll {
+        if !check_update && Instant::now() < next_poll {
             continue;
         }
         next_poll = Instant::now() + Duration::from_millis(650);
@@ -524,6 +557,9 @@ fn run_engine(
                 p
             }
             Err(e) => {
+                if check_update {
+                    let _ = ui.send(Event::UpdateIdle(false));
+                }
                 failures += 1;
                 if failures >= 3 {
                     if guard.is_some() {
@@ -534,6 +570,27 @@ fn run_engine(
                 continue;
             }
         };
+        if check_update {
+            let media_idle = audio.media_idle();
+            if !media_idle {
+                last_media = Some(Instant::now());
+            }
+            let idle = active.is_none()
+                && pending.is_empty()
+                && guard.is_none()
+                && requested_owner.is_none()
+                && !matches!(setup, PrivacySetup::Checking(..))
+                && !nearby.may_resume()
+                && media_idle
+                && last_media.is_none_or(|seen| seen.elapsed() >= super::privacy_time::GRACE)
+                && super::privacy::locked() == Some(false)
+                && matches!(dir.join(super::privacy::MARKER).try_exists(), Ok(false));
+            let _ = ui.send(Event::UpdateIdle(idle));
+            if stopping_for_update && idle {
+                let _ = ui.send(Event::StoppedForUpdate);
+                return Ok(Exit::Stop);
+            }
+        }
         if let Some((id, _, deadline)) = &active {
             let present = pending.iter().any(|p| p.id == *id);
             if !present || Instant::now() >= *deadline {

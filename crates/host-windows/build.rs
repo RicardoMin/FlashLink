@@ -1,5 +1,22 @@
 fn main() {
     if std::env::var_os("CARGO_CFG_WINDOWS").is_some() {
+        let version = flashlink_update::WINDOWS_VERSION;
+        let build = flashlink_update::WINDOWS_BUILD;
+        let number = version
+            .split('.')
+            .map(|part| part.parse::<u64>().unwrap())
+            .chain([u64::from(build)])
+            .fold(0, |number, part| (number << 16) | part);
+        winresource::WindowsResource::new()
+            .set("ProductName", "FlashLink")
+            .set("FileDescription", "FlashLink Windows Host")
+            .set("OriginalFilename", "FlashLink.exe")
+            .set("ProductVersion", version)
+            .set("FileVersion", &format!("{version}.{build}"))
+            .set_version_info(winresource::VersionInfo::PRODUCTVERSION, number)
+            .set_version_info(winresource::VersionInfo::FILEVERSION, number)
+            .compile()
+            .expect("compile Windows version resource");
         println!("cargo:rerun-if-changed=src/desktop_icons.cpp");
         println!("cargo:rerun-if-changed=src/audio_endpoint.cpp");
         println!("cargo:rerun-if-changed=src/media_transport.cpp");

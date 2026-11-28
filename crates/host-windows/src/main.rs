@@ -12,6 +12,8 @@ mod bundle;
 mod desktop_icons;
 #[cfg(windows)]
 mod gui;
+#[cfg(windows)]
+mod host_update;
 #[cfg(any(windows, test))]
 #[cfg_attr(not(windows), allow(dead_code))]
 mod lan;
@@ -232,7 +234,13 @@ fn main() -> ExitCode {
         }
     };
     #[cfg(windows)]
-    match bundle::relaunch_installed() {
+    match host_update::recover_if_interrupted().and_then(|recovering| {
+        if recovering {
+            Ok(true)
+        } else {
+            bundle::relaunch_installed()
+        }
+    }) {
         Ok(true) => return ExitCode::SUCCESS,
         Ok(false) => {}
         Err(error) => {

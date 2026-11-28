@@ -139,6 +139,8 @@ def main():
                     if notice.is_file() and notice.name.upper().startswith(("LICENSE","COPYING","NOTICE")):
                         out.write(notice, f"licenses/crates/{label}/{notice.name}")
             out.writestr("licenses/Rust-dependencies.txt", "\n".join(sorted(summaries)) + "\n")
+            owned = sorted(item.filename for item in out.infolist() if not item.is_dir())
+            out.writestr("package-files.json", json.dumps(owned, ensure_ascii=False).encode("utf-8"))
         single = args.output.with_suffix(".exe")
         application = pathlib.Path(temp)/single.name
         with zipfile.ZipFile(archive) as out:

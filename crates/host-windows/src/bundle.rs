@@ -144,7 +144,14 @@ pub fn relaunch_installed() -> io::Result<bool> {
         .truncate(false)
         .open(dir.join("install.lock"))?;
     lock.lock()?;
-    if !installed.is_file() || hash_file(&installed)? != hash_file(&current)? {
+    // A desktop shortcut may still point to the previously downloaded single-file package.
+    // Opening it after an in-app update must launch the newer installed copy.
+    let installed_is_newer = product_version(&installed)
+        .zip(product_version(&current))
+        .is_some_and(|(installed, launcher)| installed > launcher);
+    if !installed_is_newer
+        && (!installed.is_file() || hash_file(&installed)? != hash_file(&current)?)
+    {
         let tmp = dir.join(format!("update-{}.exe", nonce()?));
         if let Err(e) = fs::copy(&current, &tmp).and_then(|_| fs::rename(&tmp, &installed)) {
             let _ = fs::remove_file(tmp);
@@ -157,6 +164,42 @@ pub fn relaunch_installed() -> io::Result<bool> {
         .args(env::args_os().skip(1))
         .spawn()?;
     Ok(true)
+}
+
+fn product_version(path: &Path) -> Option<(u32, u32)> {
+    use std::{os::windows::ffi::OsStrExt, ptr};
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW, VS_FIXEDFILEINFO,
+    };
+    let path: Vec<_> = path.as_os_str().encode_wide().chain([0]).collect();
+    unsafe {
+        let len = GetFileVersionInfoSizeW(path.as_ptr(), ptr::null_mut());
+        if len == 0 {
+            return None;
+        }
+        let mut blob = vec![0u32; (len as usize).div_ceil(4)];
+        if GetFileVersionInfoW(path.as_ptr(), 0, len, blob.as_mut_ptr().cast()) == 0 {
+            return None;
+        }
+        let mut info = ptr::null_mut();
+        let mut size = 0;
+        if VerQueryValueW(
+            blob.as_ptr().cast(),
+            [92u16, 0].as_ptr(),
+            &mut info,
+            &mut size,
+        ) == 0
+            || size < size_of::<VS_FIXEDFILEINFO>() as u32
+        {
+            return None;
+        }
+        let info = &*info.cast::<VS_FIXEDFILEINFO>();
+        Some((info.dwProductVersionMS, info.dwProductVersionLS))
+    }
+}
+
+pub fn single_file() -> io::Result<bool> {
+    Ok(Bundle::open(&env::current_exe()?)?.is_some())
 }
 
 pub fn prepare() -> io::Result<Option<PathBuf>> {
