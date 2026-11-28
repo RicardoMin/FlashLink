@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 #[path = "audio_wire.rs"]
 pub mod audio_wire;
-use audio_wire::{AudioSession, Report, Streams};
+use audio_wire::{Phase, PlaybackTarget, Report, Streams};
 
 pub const DISCOVERY_PORT: u16 = 47980;
 const LIFETIME: Duration = Duration::from_secs(90);
@@ -186,7 +186,7 @@ fn receive(
         .peer_certificates()
         .and_then(|c| c.first())
         .map(|cert| <[u8; 32]>::from(Sha256::digest(cert.as_ref())));
-    let accepted = if line == b"FLASHLINK_AUDIO_CAPS/1\n" {
+    let accepted = if line == b"FLASHLINK_AUDIO_CAPS/1\n" || line == b"FLASHLINK_AUDIO_CAPS/2\n" {
         owner.is_some()
     } else if line == b"FLASHLINK_STREAM/1\n" {
         owner.is_some_and(|id| {
@@ -197,9 +197,15 @@ fn receive(
         })
     } else if let Some(report) = Report::parse(&line) {
         owner.is_some_and(|id| {
-            streams
-                .lock()
-                .is_ok_and(|mut s| s.update(id, report, Instant::now()))
+            let Ok(mut state) = streams.lock() else {
+                return false;
+            };
+            if report.phase != Phase::Prepare {
+                return state.update(id, report, Instant::now());
+            }
+            let reply = state.prepare(id, report, Instant::now());
+            drop(state);
+            reply.is_some_and(|reply| reply.recv_timeout(Duration::from_millis(1500)) == Ok(true))
         })
     } else {
         parse_pair(&line, peer, host_code)
@@ -323,8 +329,17 @@ impl Nearby {
             .map(|(_, ts)| ts)
     }
 
-    pub fn audio_session(&self) -> Option<AudioSession> {
-        self.streams.lock().ok()?.audio
+    pub fn apply_audio(
+        &self,
+        now: Instant,
+        stopping: bool,
+        media_active: impl Fn() -> bool,
+        apply: impl FnOnce(PlaybackTarget) -> io::Result<()>,
+    ) -> io::Result<()> {
+        self.streams
+            .lock()
+            .map_err(|_| io::Error::other("stream state unavailable"))?
+            .apply(now, stopping, media_active, apply)
     }
 
     pub fn take_request(&self, source_ip: IpAddr, pairing_name: &str) -> Option<Approval> {

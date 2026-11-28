@@ -10,7 +10,6 @@ import android.preference.PreferenceManager;
 import com.limelight.binding.PlatformBinding;
 import com.limelight.nvstream.http.LimelightCryptoProvider;
 import java.io.IOException;
-import java.io.InputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
@@ -21,19 +20,24 @@ import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
 import javax.net.ssl.*;
 
-/** Authenticated state from the displayed stream. Media playback never waits on the control socket. */
+/** Controller-only playback can wait for an initial mute confirmation. Heartbeats run off the UI thread. */
 final class FlashLinkPrivacyLease {
     private static final int INTERVAL_MS = 1800;
     private final Context app;
     private final boolean managed;
-    private final long session;
-    private String closing;
+    private final FlashLinkAudioControl.Session session;
+    interface Preflight {
+        void result(FlashLinkPrivacyLease lease, boolean muted);
+    }
+
+    private final Preflight preflight;
     private String finalSample;
     private String lastVolume;
     private int revision;
 
-    static FlashLinkPrivacyLease start(Activity activity, String host, int base, byte[] serverCert, boolean managed) {
-        return new FlashLinkPrivacyLease(activity.getApplicationContext(), host, base, serverCert, managed);
+    static FlashLinkPrivacyLease start(Activity activity, String host, int base, byte[] serverCert,
+                                       boolean managed, Preflight preflight) {
+        return new FlashLinkPrivacyLease(activity.getApplicationContext(), host, base, serverCert, managed, preflight);
     }
 
     // The host can discard a late final report from an Activity replaced by a newer stream.
@@ -44,13 +48,24 @@ final class FlashLinkPrivacyLease {
         return next;
     }
 
-    private FlashLinkPrivacyLease(Context context, String host, int base, byte[] serverCert, boolean managed) {
+    private FlashLinkPrivacyLease(Context context, String host, int base, byte[] serverCert,
+                                  boolean managed, Preflight preflight) {
+        this.preflight = preflight;
         this.app = context;
         this.managed = managed;
-        this.session = managed ? nextSession(context) : 0;
+        this.session = new FlashLinkAudioControl.Session(managed ? nextSession(context) : 0, preflight != null);
         Thread worker = new Thread(() -> run(host, base, serverCert), "FlashLink stream state");
         worker.setDaemon(true);
         worker.start();
+    }
+
+    synchronized boolean canStart() {
+        return session.canStart(android.os.SystemClock.elapsedRealtime());
+    }
+
+    synchronized void connected() {
+        session.connected();
+        refresh();
     }
 
     synchronized void refresh() {
@@ -67,20 +82,15 @@ final class FlashLinkPrivacyLease {
     }
 
     private synchronized void finish(String phase) {
-        if (closing != null) return;
-        closing = phase;
-        if (managed && !phase.equals("drop")) finalSample = sample();
+        if (!session.finish(phase)) return;
+        if (managed && !session.phase().equals("drop")) finalSample = sample();
         notifyAll();
     }
 
     // Called from the session's connection worker after the host and client are paired.
-    static boolean supportsAudio(Context context, String host, int base, byte[] serverCert) {
-        if (host == null || serverCert == null || base < 1032) return false;
-        try {
-            return exchange(authenticatedTls(context, serverCert), host, base, "FLASHLINK_AUDIO_CAPS/1");
-        } catch (Exception e) {
-            return false;
-        }
+    static int audioCapability(Context context, String host, int base, byte[] serverCert) throws Exception {
+        SSLContext tls = authenticatedTls(context, serverCert);
+        return FlashLinkAudioControl.capability(message -> exchange(tls, host, base, message));
     }
 
     private static SSLContext authenticatedTls(Context app, byte[] serverCert) throws Exception {
@@ -116,8 +126,7 @@ final class FlashLinkPrivacyLease {
                 stream.startHandshake();
                 stream.getOutputStream().write((message + "\n").getBytes(StandardCharsets.US_ASCII));
                 stream.getOutputStream().flush();
-                InputStream reply = stream.getInputStream();
-                return reply.read() == 'O' && reply.read() == 'K' && reply.read() == '\n';
+                return FlashLinkAudioControl.readReply(stream.getInputStream());
             }
         }
     }
@@ -134,47 +143,71 @@ final class FlashLinkPrivacyLease {
                 lastVolume = Math.max(0, Math.min(100, percent)) + " " + (audio.isStreamMute(music) ? "1" : "0");
             }
         }
-        return lastVolume == null ? null : FlashLinkAudio.route(app) + " " + FlashLinkAudio.after(app) + " " + lastVolume;
+        String route = (session.preparing() || session.phase().equals("cancel")) ? FlashLinkAudio.CONTROLLER : FlashLinkAudio.route(app);
+        return lastVolume == null ? null : route + " " + FlashLinkAudio.after(app) + " " + lastVolume;
     }
 
     private void run(String host, int base, byte[] serverCert) {
-        if (serverCert == null || host == null || base < 1032) return;
+        boolean reportedFailure = false;
         try {
             SSLContext tls = authenticatedTls(app, serverCert);
-            long sequence = 0;
+            FlashLinkAudioControl.Request request = message -> exchange(tls, host, base, message);
             while (true) {
                 final String phase;
-                final String audio;
+                final String message;
+                final boolean terminal;
+                final boolean hasAudio;
                 final int version;
                 synchronized (this) {
-                    phase = closing;
-                    if ("drop".equals(phase) || (!managed && phase != null)) return;
-                    audio = managed ? (phase == null ? sample() : finalSample) : null;
+                    terminal = session.terminal();
+                    phase = session.phase();
+                    if ("drop".equals(phase) || (!managed && terminal)) return;
+                    String audio = managed ? (terminal ? finalSample : sample()) : null;
+                    hasAudio = audio != null;
+                    message = session.report(audio);
                     version = revision;
                 }
-                String message = "FLASHLINK_STREAM/1";
-                if (audio != null) {
-                    message = "FLASHLINK_STREAM/2 " + session + " " + (++sequence) + " "
-                            + (phase == null ? "live" : phase) + " " + audio;
-                }
-                // A manual exit may coincide with a transient socket failure. The same
-                // sequence is safe to retry when the acknowledgement was lost.
-                int attempts = phase == null ? 1 : 2;
-                for (int i = 0; i < attempts; i++) {
-                    try {
-                        exchange(tls, host, base, message);
-                        break;
-                    } catch (IOException ignored) {
-                        // On network loss the host still has the last delivered sample.
+                boolean accepted = false;
+                try {
+                    if (message != null) {
+                        int attempts = terminal || phase.equals("prepare") ? 2 : 1;
+                        accepted = FlashLinkAudioControl.exchange(request, message, attempts);
                     }
+                } catch (IOException ignored) {
+                    // The next beat retries live state. Final messages retry the same sequence.
                 }
-                if (phase != null) return;
+                if (phase.equals("prepare")) {
+                    // A duplicate prepare can be in flight while the UI promotes this lease to live.
+                    synchronized (this) {
+                        if (session.preparing()) {
+                            session.confirmed(accepted, android.os.SystemClock.elapsedRealtime());
+                            preflight.result(this, accepted);
+                            if (!accepted) finish("cancel");
+                        }
+                    }
+                } else if (managed && (!accepted || !hasAudio) && !reportedFailure && !phase.equals("cancel")) {
+                    warnUnconfirmed();
+                    reportedFailure = true;
+                } else if (accepted && hasAudio) {
+                    reportedFailure = false;
+                }
+                if (terminal) return;
                 synchronized (this) {
-                    if (closing == null && revision == version) wait(INTERVAL_MS);
+                    if (!session.terminal() && revision == version) wait(INTERVAL_MS);
                 }
             }
         } catch (Exception e) {
             android.util.Log.w("FlashLink", "串流状态同步不可用：" + e.getClass().getSimpleName());
+            synchronized (this) {
+                if (session.preparing()) preflight.result(this, false);
+                else if (!session.terminal() && managed) warnUnconfirmed();
+            }
         }
+    }
+
+    private void warnUnconfirmed() {
+        new android.os.Handler(android.os.Looper.getMainLooper()).post(() ->
+                android.widget.Toast.makeText(app, "电脑未确认本次声音设置，请检查主机和局域网连接。",
+                        android.widget.Toast.LENGTH_LONG).show());
     }
 }
