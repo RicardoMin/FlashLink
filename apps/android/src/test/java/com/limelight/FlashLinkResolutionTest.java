@@ -8,17 +8,13 @@ public final class FlashLinkResolutionTest {
 
     private static final class Host implements FlashLinkResolution.Listener {
         final FlashLinkResolution size = new FlashLinkResolution(this);
-        int target, saved, restored, reconnect;
-        boolean restorePreference;
+        int target, saved, restored, failures;
         @Override public boolean request(int value) { target = value; return true; }
         @Override public void finished(int value, boolean remember) {
             if (remember) saved = value;
             else restored = value;
         }
-        @Override public void reconnect(int previous, boolean restorePreference) {
-            reconnect = previous;
-            this.restorePreference = restorePreference;
-        }
+        @Override public void unconfirmed() { failures++; }
     }
 
     public static void main(String[] args) {
@@ -51,9 +47,12 @@ public final class FlashLinkResolutionTest {
         host.size.response(ACK, HD);
         assert host.saved == HD;
         host.size.inputTooSmall(FULL_HD); // A delayed callback from the previous geometry.
-        assert host.reconnect == 0;
+        assert host.failures == 0 && !host.size.pending();
         host.size.inputTooSmall(HD); // A later keyframe exceeds the codec's actual input capacity.
-        assert host.reconnect == FULL_HD && host.restorePreference;
+        assert host.target == FULL_HD && host.size.pending();
+        host.size.response(ACK, FULL_HD);
+        host.size.presented(FULL_HD);
+        assert host.saved == FULL_HD && !host.size.pending();
 
         host = new Host();
         assert host.size.begin(HD, FULL_HD);
@@ -62,7 +61,7 @@ public final class FlashLinkResolutionTest {
         host.size.timeout(token);
         assert host.target == HD && host.size.pending();
         host.size.timeout(token);
-        assert host.reconnect == 0;
+        assert host.failures == 0;
         host.size.response(ACK, HD);
         assert host.size.pending() && host.restored == 0;
         host.size.presented(HD);
@@ -72,7 +71,7 @@ public final class FlashLinkResolutionTest {
         host.size.presented(FULL_HD);
         host.size.timeout(host.size.generation());
         host.size.timeout(host.size.generation()); // In-session rollback also failed.
-        assert host.saved == 0 && host.reconnect == HD && !host.restorePreference;
+        assert host.saved == 0 && host.failures == 1 && !host.size.pending();
         assert host.size.begin(HD, FULL_HD);
         host.size.response(FlashLinkLiveSetting.Result.REJECTED, HD);
         assert !host.size.pending() && host.saved == 0;

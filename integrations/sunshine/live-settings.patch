@@ -28,14 +28,14 @@ index 2c7ee9b..382dd0e 100644
  #undef MAIL
  
 diff --git a/src/nvenc/nvenc_base.cpp b/src/nvenc/nvenc_base.cpp
-index d20ca83..39edfaa 100644
+index d20ca83..bdc9d91 100644
 --- a/src/nvenc/nvenc_base.cpp
 +++ b/src/nvenc/nvenc_base.cpp
 @@ -667,6 +667,15 @@ namespace NVENC_NAMESPACE {
        return false;
      }
  
-+    if (client_config.videoFormat == 0 && nvenc->nvEncReconfigureEncoder) {
++    if (nvenc->nvEncReconfigureEncoder) {
 +      dynamic_bitrate = get_encoder_cap(init_params.encodeGUID, NV_ENC_CAPS_SUPPORT_DYN_BITRATE_CHANGE);
 +      live_config = enc_config;
 +      live_init = init_params;
@@ -152,7 +152,7 @@ index 8f9c8b0..d1674cf 100644
  
      struct {
 diff --git a/src/nvenc/nvenc_encoder.h b/src/nvenc/nvenc_encoder.h
-index 4c75058..03b6c62 100644
+index 4c75058..ca843c3 100644
 --- a/src/nvenc/nvenc_encoder.h
 +++ b/src/nvenc/nvenc_encoder.h
 @@ -53,6 +53,15 @@ namespace nvenc {
@@ -161,9 +161,9 @@ index 4c75058..03b6c62 100644
  
 +    /// Whether this active encoder can change its bitrate without restarting.
 +    virtual bool supports_live_bitrate() const { return false; }
-+    /// Whether the driver accepts reconfiguration of the active H.264 session.
++    /// Whether the driver accepts reconfiguration of the negotiated codec.
 +    virtual bool supports_live_framerate() { return false; }
-+    /// Reconfigure an active H.264 encoder for a new integer rate between pictures.
++    /// Reconfigure the active encoder for a new integer rate between pictures.
 +    virtual bool set_live_framerate(int) { return false; }
 +    /// Called on the encode thread between pictures, with the video-only budget.
 +    virtual bool set_live_bitrate(int) { return false; }
@@ -508,7 +508,7 @@ index c0b0f96..418e030 100644
      /**
       * @brief Enumerates supported state options.
 diff --git a/src/video.cpp b/src/video.cpp
-index 843a19a..cc80472 100644
+index 843a19a..e338612 100644
 --- a/src/video.cpp
 +++ b/src/video.cpp
 @@ -7,6 +7,7 @@
@@ -531,7 +531,7 @@ index 843a19a..cc80472 100644
 +        if (!device->nvenc->set_live_framerate(fps)) {
 +          return bitrate_status_e::failed;
 +        }
-+        // Send the updated H.264 timing information with the next picture.
++        // Repeat the codec's sequence headers with the new timing.
 +        request_idr_frame();
 +      }
 +      return bitrate_status_e::applied;
@@ -868,7 +868,7 @@ index 843a19a..cc80472 100644
      std::shared_ptr<platf::display_t> disp,
      std::unique_ptr<platf::encode_device_t> encode_device,
      safe::signal_t &reinit_event,
-@@ -2413,44 +2676,67 @@ namespace video {
+@@ -2413,44 +2676,66 @@ namespace video {
        return;
      }
  
@@ -930,8 +930,7 @@ index 843a19a..cc80472 100644
      }
 -
 +    // The native NVENC session uses independent D3D devices for each scaler.
-+    const bool can_resize = config.videoFormat == 0 &&
-+                            dynamic_cast<nvenc_encode_session_t *>(session.get()) &&
++    const bool can_resize = dynamic_cast<nvenc_encode_session_t *>(session.get()) &&
 +                            valid_live_resolution(pack_resolution(config.width, config.height));
 +    // Never offer the startup dummy to the replacement encoder.
 +    last_image.reset();
@@ -964,7 +963,7 @@ index 843a19a..cc80472 100644
      while (true) {
        bool requested_idr_frame = false;
  
-@@ -2473,12 +2759,15 @@ namespace video {
+@@ -2473,12 +2758,15 @@ namespace video {
  
        // Encode at a minimum FPS to avoid image quality issues with static content
        if (!requested_idr_frame || images->peek()) {
@@ -981,7 +980,7 @@ index 843a19a..cc80472 100644
          } else if (!images->running()) {
            break;
          }
-@@ -2498,11 +2787,20 @@ namespace video {
+@@ -2498,11 +2786,20 @@ namespace video {
          break;
        }
  
@@ -1003,7 +1002,7 @@ index 843a19a..cc80472 100644
        session->request_normal_frame();
  
        // While streaming check to see if the mouse is present and enable Mouse Keys to force the cursor to appear
-@@ -2776,6 +3074,8 @@ namespace video {
+@@ -2776,6 +3073,8 @@ namespace video {
              continue;
            }
  
@@ -1012,7 +1011,7 @@ index 843a19a..cc80472 100644
            if (ctx->idr_events->peek()) {
              pos->session->request_idr_frame();
              ctx->idr_events->pop();
-@@ -2890,7 +3190,8 @@ namespace video {
+@@ -2890,7 +3189,8 @@ namespace video {
        return;
      }
  
@@ -1022,7 +1021,7 @@ index 843a19a..cc80472 100644
  
      if (!ref->capture_ctx_queue->running()) {
        return;
-@@ -2946,6 +3247,7 @@ namespace video {
+@@ -2946,6 +3246,7 @@ namespace video {
          frame_nr,
          mail,
          images,
@@ -1030,7 +1029,7 @@ index 843a19a..cc80472 100644
          config,
          display,
          std::move(encode_device),
-@@ -2979,6 +3281,7 @@ namespace video {
+@@ -2979,6 +3280,7 @@ namespace video {
        safe::signal_t join_event;
        auto ref = capture_thread_sync.ref();
        ref->encode_session_ctx_queue.raise(sync_session_ctx_t {
@@ -1039,7 +1038,7 @@ index 843a19a..cc80472 100644
          mail->event<bool>(mail::shutdown),
          mail::man->queue<packet_t>(mail::video_packets),
 diff --git a/src/video.h b/src/video.h
-index 63f3cf5..72ebcad 100644
+index 63f3cf5..1708ef3 100644
 --- a/src/video.h
 +++ b/src/video.h
 @@ -39,8 +39,60 @@ namespace video {
@@ -1092,7 +1091,7 @@ index 63f3cf5..72ebcad 100644
 +    return (uint32_t(width) << 16) | uint32_t(height);
 +  }
 +
-+  /// Bound replacement encoder allocations to DCI 4K and even H.264 dimensions.
++  /// Bound replacement encoder allocations to DCI 4K and even frame dimensions.
 +  constexpr bool valid_live_resolution(uint32_t size) {
 +    const auto width = size >> 16;
 +    const auto height = size & 0xffff;

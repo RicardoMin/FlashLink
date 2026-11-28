@@ -9,12 +9,9 @@ import android.os.Handler;
 import android.os.SystemClock;
 import android.preference.PreferenceManager;
 import android.util.Log;
-import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.SurfaceHolder;
 import android.view.View;
-import android.widget.FrameLayout;
-import android.widget.TextView;
 import android.widget.Toast;
 
 import com.limelight.binding.audio.AndroidAudioRenderer;
@@ -30,15 +27,6 @@ public final class FlashLinkGame extends Game {
     static final String DEADLINE = "dev.flashlink.recoveryDeadline";
     static final int NETWORK_LOST = RESULT_FIRST_USER + 1;
     static final int EXPIRED = RESULT_FIRST_USER + 2;
-    static final int QUALITY_CHANGE = RESULT_FIRST_USER + 3;
-    static final int QUALITY_FAILED = RESULT_FIRST_USER + 4;
-    static final String PREVIOUS_QUALITY = "dev.flashlink.previousQuality";
-    static final String FAILURE = "dev.flashlink.qualityFailure";
-    static final String RESTORE_FAILURE = "dev.flashlink.restoreFailure";
-    static final String RESTORING = "dev.flashlink.restoringQuality";
-    static final String RESTORE_UNTIL = "dev.flashlink.restoreUntil";
-    private static final String RESTORE_SIZE_PREF = "dev.flashlink.restoreSizePreference";
-    static final String RETRYABLE = "dev.flashlink.retryable";
     static final String LOG = "FlashLinkSession";
     private final Handler timer = new Handler();
     private final Runnable expire = () -> endWith(EXPIRED, 0);
@@ -53,11 +41,7 @@ public final class FlashLinkGame extends Game {
     private SurfaceHolder pendingSurface;
     private Runnable startMedia;
     private FlashLinkQuality activeQuality;
-    private volatile FlashLinkQuality pendingQuality;
-    private volatile boolean handingOff;
-    private volatile String negotiationProblem;
-    private TextView qualityProgress;
-    private final Runnable qualityTimeout = () -> qualityFailed("等待电脑连接并传回第一帧画面超时。", true);
+    private FlashLinkQuality requestedQuality;
 
     private final ExecutorService settingSender = Executors.newSingleThreadExecutor();
     private final FlashLinkLiveSetting liveBitrate = newSetting(FlashLinkLiveSetting.Kind.BITRATE);
@@ -80,20 +64,15 @@ public final class FlashLinkGame extends Game {
             if (saved) {
                 PreferenceConfiguration.saveStreamSize(FlashLinkGame.this, width, height);
                 Log.i(LOG, "RESOLUTION_APPLIED " + width + "x" + height);
-                notifySetting("分辨率已切换至 " + width + " × " + height);
+                continueQualityChange();
             } else {
-                notifySetting("未应用新分辨率，继续使用原画面。");
+                failQualityChange("电脑未能切换至所选分辨率。");
             }
         }
 
-        @Override public void reconnect(int previous, boolean restorePreference) {
-            FlashLinkQuality restore = new FlashLinkQuality(previous >>> 16, previous & 0xffff,
-                    activeQuality.fps, activeQuality.bitrateKbps);
-            Intent data = new Intent(getIntent()).putExtra(PREVIOUS_QUALITY, restore.toArray())
-                    .putExtra(RESTORE_SIZE_PREF, restorePreference)
-                    .putExtra(FAILURE, "新分辨率未能显示，正在恢复上次可用画质。");
-            data.removeExtra(RESTORING);
-            handOffQuality(QUALITY_FAILED, data);
+        @Override public void unconfirmed() {
+            setDecoderResizing(false);
+            failQualityChange("尚未确认电脑画面尺寸。");
         }
     });
     private boolean openQualityWhenReady;
@@ -133,7 +112,7 @@ public final class FlashLinkGame extends Game {
                 } else onSettingResult(fps, result, value);
                 if (openQualityWhenReady && !waitingForSetting()) {
                     openQualityWhenReady = false;
-                    if (foreground && !handingOff && !isFinishing() && !isDestroyed()) openQualityDialog();
+                    if (foreground && !isFinishing() && !isDestroyed()) openQualityDialog();
                 }
             }
         });
@@ -156,13 +135,13 @@ public final class FlashLinkGame extends Game {
         switch (result) {
             case APPLIED:
                 Log.i(LOG, (fps ? "FPS_APPLIED " : "BITRATE_APPLIED ") + value);
-                notifySetting(label + "已切换至 " + (fps ? value + " FPS" : FlashLinkQuality.mbps(value) + " Mbps"));
+                continueQualityChange();
                 break;
             case REJECTED:
-                notifySetting("电脑未应用所选" + label + "，串流继续。");
+                failQualityChange("电脑未应用所选" + label + "。");
                 break;
             case UNCONFIRMED:
-                notifySetting("尚未确认电脑当前" + label + "，串流继续。");
+                failQualityChange("尚未确认电脑当前" + label + "。");
                 break;
             case CURRENT:
                 break;
@@ -202,7 +181,7 @@ public final class FlashLinkGame extends Game {
     }
 
     private void openQualityDialog() {
-        new FlashLinkQualityDialog(this, activeQuality, liveBitrate.state(), liveFps.state(), liveSize.state()).show();
+        new FlashLinkQualityDialog(this, activeQuality).show();
     }
 
     private void closeLiveSettings() {
@@ -211,28 +190,22 @@ public final class FlashLinkGame extends Game {
         liveFps.close();
         liveSize.close();
         resolution.close();
+        requestedQuality = null;
         settingSender.shutdownNow();
     }
 
     @Override protected void onCreate(Bundle state) {
-        pendingQuality = FlashLinkQuality.fromArray(getIntent().getIntArrayExtra(FlashLinkQuality.EXTRA));
         super.onCreate(state);
         recoveryDeadline = getIntent().getLongExtra(DEADLINE, 0);
         if (recoveryDeadline > 0) {
             timer.postDelayed(expire, Math.max(0, recoveryDeadline - SystemClock.elapsedRealtime()));
-        }
-        if (pendingQuality != null && !isFinishing()) {
-            showQualityProgress(isRestoring() ? "正在恢复上次画质…" : "正在应用画质，等待电脑画面…");
-            long timeout = isRestoring() ? getIntent().getLongExtra(RESTORE_UNTIL, 0) - SystemClock.elapsedRealtime()
-                    : FlashLinkReconnect.WINDOW_MS;
-            timer.postDelayed(qualityTimeout, Math.max(0, timeout));
         }
     }
 
     @Override public void connectionStarted() {
         super.connectionStarted();
         runOnUiThread(() -> {
-            if (handingOff || isFinishing() || isDestroyed()) return;
+            if (isFinishing() || isDestroyed()) return;
             startedAt = SystemClock.elapsedRealtime();
             if (recoveryDeadline > 0 && startedAt >= recoveryDeadline) {
                 expire.run();
@@ -242,7 +215,7 @@ public final class FlashLinkGame extends Game {
             Log.i(LOG, recoveryDeadline == 0 ? "STREAM_STARTED" : "STREAM_RESUMED");
             if (privacyLease == null) privacyLease = startLease(null);
             else privacyLease.connected();
-            if (!managedAudio() && recoveryDeadline == 0 && pendingQuality == null) {
+            if (!managedAudio() && recoveryDeadline == 0) {
                 Toast.makeText(this, "本次使用兼容音频模式，断开后的电脑音量设置不会生效。", Toast.LENGTH_LONG).show();
             }
             streamReady();
@@ -255,7 +228,7 @@ public final class FlashLinkGame extends Game {
     }
 
     @Override protected void onStreamSizePresented(int width, int height) {
-        if (handingOff || activeQuality == null || isFinishing()) return;
+        if (activeQuality == null || isFinishing()) return;
         if (activeQuality.width != width || activeQuality.height != height) {
             updateStreamSize(width, height);
             activeQuality = new FlashLinkQuality(width, height, activeQuality.fps, activeQuality.bitrateKbps);
@@ -265,35 +238,14 @@ public final class FlashLinkGame extends Game {
     }
 
     @Override protected void recoverOversizedStream(int size) {
-        resolution.inputTooSmall(size);
+        if (resolution.inputTooSmall(size)) {
+            requestedQuality = null;
+            notifySetting("新尺寸的画面超出解码缓冲，正在尝试恢复上次分辨率。");
+        }
     }
 
     private void streamReady() {
-        if (startedAt == 0 || activeQuality == null || tools != null || handingOff || isFinishing() || isDestroyed()) return;
-        if (pendingQuality != null) {
-            if (isRestoring() && SystemClock.elapsedRealtime() >= getIntent().getLongExtra(RESTORE_UNTIL, 0)) {
-                qualityTimeout.run();
-                return;
-            }
-            if (!pendingQuality.equals(activeQuality)) {
-                qualityFailed("电脑协商的参数为 " + activeQuality.displayText() + "，与所选画质不一致。", false);
-                return;
-            }
-            timer.removeCallbacks(qualityTimeout);
-            if (isRestoring()) {
-                if (getIntent().getBooleanExtra(RESTORE_SIZE_PREF, false)) {
-                    PreferenceConfiguration.saveStreamSize(this, activeQuality.width, activeQuality.height);
-                    getIntent().removeExtra(RESTORE_SIZE_PREF);
-                }
-                Toast.makeText(this, lastQualityFailure() + "\n已恢复上次画质。", Toast.LENGTH_LONG).show();
-            } else {
-                rememberStreamQuality(activeQuality);
-                Toast.makeText(this, "画质已切换至 " + activeQuality.displayText(), Toast.LENGTH_SHORT).show();
-            }
-            Log.i(LOG, (isRestoring() ? "QUALITY_RESTORED " : "QUALITY_APPLIED ") + activeQuality.displayText());
-            pendingQuality = null;
-            qualityProgress.setVisibility(View.GONE);
-        }
+        if (startedAt == 0 || activeQuality == null || tools != null || isFinishing() || isDestroyed()) return;
         tools = new FlashLinkStreamTools(this);
         tools.attach();
         liveBitrate.probe();
@@ -302,97 +254,71 @@ public final class FlashLinkGame extends Game {
     }
 
     FlashLinkQuality currentQuality() { return activeQuality; }
-    String lastQualityFailure() { return isRestoring() ? getIntent().getStringExtra(FAILURE) : null; }
+    String liveQualityRestriction(FlashLinkQuality selected) {
+        boolean resize = selected.width != activeQuality.width || selected.height != activeQuality.height;
+        if ((resize && liveSize.state() != FlashLinkLiveSetting.State.READY) ||
+                (selected.fps != activeQuality.fps && liveFps.state() != FlashLinkLiveSetting.State.READY) ||
+                (selected.bitrateKbps != activeQuality.bitrateKbps && liveBitrate.state() != FlashLinkLiveSetting.State.READY)) {
+            return "当前电脑未提供所选参数的实时切换，请确认 Windows 主机已更新。";
+        }
+        if (resize && (!FlashLinkResolution.valid(FlashLinkResolution.pack(selected.width, selected.height)) ||
+                !supportsLiveSize(selected.width, selected.height, selected.fps))) {
+            return "当前解码器无法在播放中切换至所选分辨率和帧率。";
+        }
+        if (!FlashLinkLiveSetting.Kind.FRAME_RATE.valid(selected.fps) && selected.fps != activeQuality.fps) {
+            return "当前串流支持的帧率范围为 1–240 FPS。";
+        }
+        return null;
+    }
 
-    void applyQuality(FlashLinkQuality selected, boolean reconnect) {
-        if (tools == null || activeQuality == null || selected.equals(activeQuality) || handingOff) return;
-        if (!reconnect) {
-            boolean queued;
-            if (selected.width != activeQuality.width || selected.height != activeQuality.height) {
-                queued = resolution.begin(FlashLinkResolution.pack(activeQuality.width, activeQuality.height),
-                        FlashLinkResolution.pack(selected.width, selected.height));
-            } else {
-                queued = selected.fps != activeQuality.fps ? liveFps.set(selected.fps) : liveBitrate.set(selected.bitrateKbps);
-            }
-            if (!queued) notifySetting("暂时无法切换串流设置，请重试。");
+    void applyQuality(FlashLinkQuality selected) {
+        if (tools == null || activeQuality == null || waitingForSetting() || requestedQuality != null) return;
+        String reason = liveQualityRestriction(selected);
+        if (reason != null) {
+            notifySetting(reason);
             return;
         }
-        Intent next = new Intent(getIntent());
-        next.putExtra(FlashLinkQuality.EXTRA, selected.toArray());
-        next.putExtra(PREVIOUS_QUALITY, activeQuality.toArray());
-        next.removeExtra(RESTORING);
-        next.removeExtra(FAILURE);
-        next.removeExtra(RESTORE_FAILURE);
-        next.removeExtra(DEADLINE);
-        showQualityProgress("正在切换到 " + selected.displayText() + "…");
-        handOffQuality(QUALITY_CHANGE, next);
+        requestedQuality = selected;
+        continueQualityChange();
     }
 
-    private boolean isRestoring() { return getIntent().getBooleanExtra(RESTORING, false); }
-
-    private void showQualityProgress(String message) {
-        if (qualityProgress == null) {
-            qualityProgress = new TextView(this);
-            int inset = Math.round(12 * getResources().getDisplayMetrics().density);
-            qualityProgress.setPadding(inset, inset, inset, inset);
-            qualityProgress.setTextColor(android.graphics.Color.WHITE);
-            qualityProgress.setBackgroundColor(0xdf202833);
-            addContentView(qualityProgress, new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER));
+    private void continueQualityChange() {
+        FlashLinkQuality target = requestedQuality;
+        if (target == null) return;
+        FlashLinkLiveSetting.Kind next = activeQuality.nextChange(target);
+        if (next == null) {
+            requestedQuality = null;
+            notifySetting("画质已切换至 " + activeQuality.displayText());
+            return;
         }
-        qualityProgress.setText(message);
-        qualityProgress.setVisibility(View.VISIBLE);
-    }
-
-    private void qualityFailed(String reason, boolean retryable) {
-        if (pendingQuality == null || handingOff || isFinishing() || isDestroyed()) return;
-        showQualityProgress(reason);
-        Log.i(LOG, "QUALITY_FAILED");
-        handOffQuality(QUALITY_FAILED, new Intent(getIntent()).putExtra(isRestoring() ? RESTORE_FAILURE : FAILURE, reason)
-                .putExtra(RETRYABLE, retryable));
-    }
-
-    private void handOffQuality(int result, Intent next) {
-        handingOff = true;
-        closeLiveSettings();
-        if (privacyLease != null) {
-            privacyLease.handoff();
-            privacyLease = null;
+        boolean queued;
+        switch (next) {
+            case FRAME_RATE:
+                queued = liveFps.set(target.fps);
+                break;
+            case RESOLUTION:
+                queued = resolution.begin(FlashLinkResolution.pack(activeQuality.width, activeQuality.height),
+                        FlashLinkResolution.pack(target.width, target.height));
+                break;
+            case BITRATE:
+                queued = liveBitrate.set(target.bitrateKbps);
+                break;
+            default:
+                throw new AssertionError(next);
         }
-        timer.removeCallbacks(qualityTimeout);
-        releaseControls();
-        if (tools != null) tools.setVisible(false);
-        // The native stop is asynchronous. Wait for teardown before another player starts /resume.
-        stopConnectionForQuality(() -> {
-            if (isFinishing() || isDestroyed()) return;
-            setResult(result, next);
-            finish();
-        });
+        if (!queued) failQualityChange("暂时无法切换串流设置。");
     }
 
-    @Override protected String stageProgressMessage(String stage) {
-        if (pendingQuality != null) {
-            return isRestoring() ? "正在恢复上次画质…" : "正在协商新的串流画质…";
-        }
-        return super.stageProgressMessage(stage);
-    }
-
-    @Override public void displayMessage(String message) {
-        if (pendingQuality == null) super.displayMessage(message);
-        else negotiationProblem = message;
+    private void failQualityChange(String reason) {
+        requestedQuality = null;
+        notifySetting(reason + " 上次确认的画质为 " + activeQuality.displayText());
     }
 
     @Override public void connectionTerminated(int code) {
         runOnUiThread(() -> {
-            if (handingOff || isFinishing() || isDestroyed()) return;
+            if (isFinishing() || isDestroyed()) return;
             releaseControls();
             closeLiveSettings();
-            // Decide alongside the first-frame callback: it may already have committed this profile.
-            if (pendingQuality != null) {
-                qualityFailed(code == MoonBridge.ML_ERROR_NO_VIDEO_FRAME || code == MoonBridge.ML_ERROR_NO_VIDEO_TRAFFIC
-                        ? "电脑未能传回可播放的视频画面。" : "画质切换期间连接中断（" + code + "）。",
-                        FlashLinkReconnect.transportLost(code) || code == MoonBridge.ML_ERROR_NO_VIDEO_FRAME);
-                return;
-            }
             closeLease(!FlashLinkReconnect.transportLost(code));
             if (!FlashLinkReconnect.transportLost(code) || (startedAt == 0 && recoveryDeadline == 0)) {
                 timer.removeCallbacks(expire);
@@ -412,15 +338,9 @@ public final class FlashLinkGame extends Game {
     }
 
     @Override public void stageFailed(String stage, int ports, int error) {
-        if (handingOff || isFinishing()) return;
+        if (isFinishing()) return;
         runOnUiThread(() -> { if (startedAt == 0) closeLease(false); });
-        if (pendingQuality != null) {
-            String detail = negotiationProblem;
-            String reason = stage + " 阶段失败" + (error != 0 ? "（" + error + "）" : "") + "。";
-            boolean retryable = (ports != 0 && (error == 0 || FlashLinkReconnect.transportLost(error)))
-                    || error == 503;
-            runOnUiThread(() -> qualityFailed(detail == null || detail.isEmpty() ? reason : reason + detail, retryable));
-        } else if (recoveryDeadline > 0 && ports != 0 && (error == 0 || FlashLinkReconnect.transportLost(error))) {
+        if (recoveryDeadline > 0 && ports != 0 && (error == 0 || FlashLinkReconnect.transportLost(error))) {
             runOnUiThread(() -> { if (foreground) endWith(NETWORK_LOST, recoveryDeadline); });
         } else {
             timer.removeCallbacks(expire);
@@ -437,7 +357,7 @@ public final class FlashLinkGame extends Game {
 
     @Override protected boolean handleStreamFingerTouch(View source, View video, MotionEvent event,
                                                         NvConnection connection) {
-        if (tools == null || handingOff || !foreground || !hasWindowFocus() || isFinishing()) return true;
+        if (tools == null || !foreground || !hasWindowFocus() || isFinishing()) return true;
         if (streamTouch == null) streamTouch = new FlashLinkStreamTouch(this, video, connection);
         return streamTouch.onTouch(source, event, isTouchscreenTrackpad());
     }
@@ -489,15 +409,12 @@ public final class FlashLinkGame extends Game {
     private void prepareSurface() {
         if (!foreground || pendingSurface == null || privacyLease != null) return;
         privacyLease = startLease((lease, muted) -> runOnUiThread(() -> {
-            if (privacyLease != lease || handingOff || isFinishing() || isDestroyed()) return;
+            if (privacyLease != lease || isFinishing() || isDestroyed()) return;
             if (!muted) {
                 closeLease(false);
                 String reason = "电脑未确认扬声器已静音。请检查电脑的播放设备和局域网后重新连接。";
-                if (pendingQuality != null) qualityFailed(reason, true);
-                else {
-                    Toast.makeText(this, reason, Toast.LENGTH_LONG).show();
-                    finish();
-                }
+                Toast.makeText(this, reason, Toast.LENGTH_LONG).show();
+                finish();
                 return;
             }
             // A queued confirmation may outlive its Surface or the host's preparation lease.

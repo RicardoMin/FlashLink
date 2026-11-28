@@ -32,7 +32,7 @@ final class FlashLinkLiveSetting {
     }
     State state() { return state; }
     boolean waiting() { return state == State.PROBING || state == State.SETTING || state == State.VERIFYING; }
-    boolean probing() { return state == State.PROBING || state == State.UNKNOWN; }
+    boolean probing() { return state == State.NEW || state == State.PROBING || state == State.UNKNOWN; }
 
     void probe() {
         if (state == State.NEW) issue(State.PROBING, 0);
@@ -79,7 +79,8 @@ final class FlashLinkLiveSetting {
             // A SET may have reached the encoder even when its reply hasn't reached us.
             issue(State.VERIFYING, 0);
         } else if (state == State.PROBING) {
-            state = State.UNAVAILABLE;
+            // A slow first reply is not a permanent capability rejection. Probe again on demand.
+            state = State.NEW;
             listener.result(Result.CURRENT, 0);
         } else {
             state = State.UNKNOWN;

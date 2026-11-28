@@ -67,8 +67,8 @@ index 9d13f4b..d04243e 100644
 +    if (variant.name == 'nonRootRelease') {
 +        variant.applicationId.set('io.github.ricardomin.flashlink')
 +        variant.outputs.each { output ->
-+            output.versionName.set('0.3.0')
-+            output.versionCode.set(317)
++            output.versionName.set('0.3.1')
++            output.versionCode.set(318)
 +        }
 +    }
 +}

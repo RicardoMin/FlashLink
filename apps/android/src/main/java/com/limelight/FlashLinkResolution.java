@@ -6,12 +6,12 @@ final class FlashLinkResolution {
     interface Listener {
         boolean request(int size);
         void finished(int size, boolean saved);
-        void reconnect(int previous, boolean restorePreference);
+        void unconfirmed();
     }
     private final Listener listener;
     private int previous, target, presented, generation;
     private int confirmed, fallbackSize;
-    private boolean acknowledged, restoring;
+    private boolean acknowledged, restoring, restorePreference;
 
     FlashLinkResolution(Listener listener) { this.listener = listener; }
     static int pack(int width, int height) { return (width << 16) | height; }
@@ -26,7 +26,7 @@ final class FlashLinkResolution {
     boolean begin(int current, int next) {
         if (pending() || !valid(next) || next == current) return false;
         previous = presented = current;
-        restoring = acknowledged = false;
+        restoring = acknowledged = restorePreference = false;
         return request(next);
     }
 
@@ -63,7 +63,7 @@ final class FlashLinkResolution {
                 confirmed = presented;
                 fallbackSize = previous;
             }
-            listener.finished(presented, !restoring);
+            listener.finished(presented, !restoring || restorePreference);
         }
     }
 
@@ -77,14 +77,20 @@ final class FlashLinkResolution {
             if (request(previous)) return;
         }
         target = 0;
-        listener.reconnect(previous, false);
+        confirmed = 0;
+        listener.unconfirmed();
     }
 
-    void inputTooSmall(int size) {
+    boolean inputTooSmall(int size) {
         if (!pending() && confirmed != 0 && size == confirmed && presented == size) {
             confirmed = 0;
-            listener.reconnect(fallbackSize, true);
+            previous = fallbackSize;
+            restoring = restorePreference = true;
+            acknowledged = false;
+            if (!request(previous)) listener.unconfirmed();
+            return true;
         }
+        return false;
     }
 
     void close() {

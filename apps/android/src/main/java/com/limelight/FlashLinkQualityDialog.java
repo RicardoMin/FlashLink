@@ -3,7 +3,6 @@ package com.limelight;
 
 import android.app.AlertDialog;
 import android.content.Context;
-import android.os.Build;
 import android.text.Editable;
 import android.text.InputType;
 import android.text.TextWatcher;
@@ -32,18 +31,12 @@ import java.util.function.Supplier;
 final class FlashLinkQualityDialog {
     private final FlashLinkGame game;
     private final FlashLinkQuality active;
-    private final FlashLinkLiveSetting.State bitrateState, fpsState, sizeState;
     private final AlertDialog.Builder builder;
     private final LinearLayout form;
 
-    FlashLinkQualityDialog(FlashLinkGame game, FlashLinkQuality active,
-                           FlashLinkLiveSetting.State bitrateState, FlashLinkLiveSetting.State fpsState,
-                           FlashLinkLiveSetting.State sizeState) {
+    FlashLinkQualityDialog(FlashLinkGame game, FlashLinkQuality active) {
         this.game = game;
         this.active = active;
-        this.bitrateState = bitrateState;
-        this.fpsState = fpsState;
-        this.sizeState = sizeState;
         builder = new AlertDialog.Builder(game);
         form = new LinearLayout(builder.getContext());
         form.setOrientation(LinearLayout.VERTICAL);
@@ -103,23 +96,13 @@ final class FlashLinkQualityDialog {
         custom.setSelectAllOnFocus(true);
         custom.setVisibility(View.GONE);
         form.addView(custom);
-        if (bitrateState == FlashLinkLiveSetting.State.UNKNOWN || fpsState == FlashLinkLiveSetting.State.UNKNOWN ||
-                sizeState == FlashLinkLiveSetting.State.UNKNOWN) {
-            TextView warning = new TextView(builder.getContext());
-            warning.setText("部分串流设置未确认。这里显示上次确认的设置。");
-            form.addView(warning);
-        }
-        String failure = game.lastQualityFailure();
-        if (failure != null) {
-            TextView reason = new TextView(builder.getContext());
-            reason.setText("上次切换失败：" + failure);
-            form.addView(reason);
-        }
+        TextView reason = new TextView(builder.getContext());
+        form.addView(reason);
 
         ScrollView scroll = new ScrollView(builder.getContext());
         scroll.addView(form);
         AlertDialog dialog = builder.setTitle("串流画质").setView(scroll)
-                .setNegativeButton("取消", null).setPositiveButton("应用并重连", null).create();
+                .setNegativeButton("取消", null).setPositiveButton("应用", null).create();
         dialog.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN |
                 WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
         dialog.show();
@@ -143,8 +126,10 @@ final class FlashLinkQualityDialog {
         };
         Runnable updateAction = () -> {
             FlashLinkQuality target = selection.get();
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setText(target != null && canApplyLive(target)
-                    ? "应用" : "应用并重连");
+            String message = target == null ? "请输入 0.5–150 Mbps，最多三位小数" : game.liveQualityRestriction(target);
+            reason.setText(message);
+            reason.setVisibility(message == null ? View.GONE : View.VISIBLE);
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(message == null && !active.equals(target));
         };
         AdapterView.OnItemSelectedListener changed = new AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(AdapterView<?> parent, View view, int index, long id) {
@@ -169,33 +154,8 @@ final class FlashLinkQualityDialog {
                 return;
             }
             dialog.dismiss();
-            if (!active.equals(selected)) game.applyQuality(selected, !canApplyLive(selected));
+            game.applyQuality(selected);
         });
-    }
-
-    private boolean canApplyLive(FlashLinkQuality selected) {
-        return active.canApplyLive(selected, bitrateState == FlashLinkLiveSetting.State.READY,
-                fpsState == FlashLinkLiveSetting.State.READY && FlashLinkLiveSetting.Kind.FRAME_RATE.valid(selected.fps)
-                        && (selected.fps == active.fps || canKeepDisplayMode(selected.fps)),
-                sizeState == FlashLinkLiveSetting.State.READY &&
-                        FlashLinkResolution.valid(FlashLinkResolution.pack(selected.width, selected.height)) &&
-                        game.supportsLiveSize(selected.width, selected.height));
-    }
-
-    private boolean canKeepDisplayMode(int fps) {
-        Display display = game.getWindowManager().getDefaultDisplay();
-        if (fps <= Math.round(display.getRefreshRate())) return true;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && game.getWindow().getAttributes().preferredDisplayModeId == 0) {
-            for (float hz : display.getMode().getAlternativeRefreshRates()) {
-                if (Math.round(hz) >= fps) return true;
-            }
-        }
-        // Reuse the normal launch-time mode selection when a higher mode needs a display reset.
-        for (Display.Mode mode : display.getSupportedModes()) {
-            if (Math.round(mode.getRefreshRate()) >= fps) return false;
-        }
-        // The user may deliberately stream above the panel's maximum refresh rate.
-        return true;
     }
 
     private Spinner selector(String name, List<String> choices, int selected) {

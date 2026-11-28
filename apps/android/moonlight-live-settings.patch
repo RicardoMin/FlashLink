@@ -27,8 +27,8 @@ diff --git a/app/src/main/java/com/limelight/Game.java b/app/src/main/java/com/l
 +        if (remember) PreferenceConfiguration.saveStreamBitrate(this, kbps);
 +    }
 +
-+    protected final boolean supportsLiveSize(int width, int height) {
-+        return decoderRenderer.supportsLiveSize(width, height);
++    protected final boolean supportsLiveSize(int width, int height, int fps) {
++        return decoderRenderer.supportsLiveSize(width, height, fps);
 +    }
 +
 +    protected final void updateStreamSize(int width, int height) {
@@ -177,15 +177,15 @@ diff --git a/app/src/main/java/com/limelight/binding/video/MediaCodecDecoderRend
 +    private volatile int adaptiveWidth, adaptiveHeight;
 +    private volatile MediaCodecInfo.VideoCapabilities sizeCaps;
 +
-+    public boolean supportsLiveSize(int width, int height) {
++    public boolean supportsLiveSize(int width, int height, int fps) {
 +        MediaCodecInfo.VideoCapabilities caps = sizeCaps;
 +        return caps != null && width <= adaptiveWidth && height <= adaptiveHeight
-+                && caps.areSizeAndRateSupported(width, height, refreshRate);
++                && caps.areSizeAndRateSupported(width, height, fps);
 +    }
 +
 +    private FlashLinkDecoderBounds chooseAdaptiveBounds(MediaCodecInfo info, String mime) {
 +        sizeCaps = null;
-+        if (!adaptivePlayback || !fusedIdrFrame || !"video/avc".equals(mime)) {
++        if (!adaptivePlayback || !fusedIdrFrame) {
 +            return new FlashLinkDecoderBounds(initialWidth, initialHeight, 0, null);
 +        }
 +        sizeCaps = info.getCapabilitiesForType(mime).getVideoCapabilities();
@@ -193,7 +193,7 @@ diff --git a/app/src/main/java/com/limelight/binding/video/MediaCodecDecoderRend
 +                activity.getSystemService(android.content.Context.ACTIVITY_SERVICE);
 +        int maxLongEdge = manager.isLowRamDevice() ? 1920 : 4096;
 +        return new FlashLinkDecoderBounds(initialWidth, initialHeight, maxLongEdge,
-+                (width, height) -> sizeCaps.areSizeAndRateSupported(width, height, refreshRate));
++                sizeCaps::isSizeSupported);
 +    }
      private MediaFormat configuredFormat;
  
@@ -251,7 +251,7 @@ diff --git a/app/src/main/java/com/limelight/binding/video/MediaCodecDecoderRend
 +            videoFormat.setInteger(MediaFormat.KEY_MAX_WIDTH, adaptiveWidth);
 +            videoFormat.setInteger(MediaFormat.KEY_MAX_HEIGHT, adaptiveHeight);
 +            if (adaptiveWidth > initialWidth || adaptiveHeight > initialHeight) {
-+                // Size the compressed AVC access-unit buffer for the largest adaptive IDR.
++                // Size the compressed access-unit buffer for the largest adaptive IDR.
 +                int blocks = ((adaptiveWidth + 15) / 16) * ((adaptiveHeight + 15) / 16);
 +                videoFormat.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, blocks * 192);
 +            }

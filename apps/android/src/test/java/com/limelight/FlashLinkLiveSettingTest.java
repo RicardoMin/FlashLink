@@ -70,6 +70,15 @@ public final class FlashLinkLiveSettingTest {
         legacy.control.timeout(legacy.id);
         legacy.control.response(legacy.id, 0, 10000);
         assert !legacy.control.set(8000) && legacy.sends == 1;
+        legacy.control.probe(); // A late startup response can be retried from the quality dialog.
+        assert legacy.sends == 2;
+        legacy.control.response(legacy.id, 0, 10000);
+        assert legacy.control.set(8000);
+        Host unsupported = new Host();
+        unsupported.control.probe();
+        unsupported.control.response(unsupported.id, 1, 0);
+        unsupported.control.probe();
+        assert !unsupported.control.set(8000) && unsupported.sends == 1;
         Host stopping = new Host();
         stopping.control.probe();
         stopping.control.close();
