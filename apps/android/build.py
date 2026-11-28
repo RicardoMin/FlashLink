@@ -41,6 +41,20 @@ def apply_patch(host, patch, *options):
     subprocess.run(["git", "apply", *options, "-"], cwd=host, input=patch, check=True)
 
 
+def verify_patches(host, *patches):
+    # Later integration patches can refine code added by an earlier one. Compare
+    # the cached source to the complete ordered patch series in a temporary index.
+    with tempfile.TemporaryDirectory() as tmp:
+        env = {**os.environ, "GIT_INDEX_FILE": str(Path(tmp) / "index")}
+        subprocess.run(["git", "read-tree", "HEAD"], cwd=host, env=env, check=True)
+        for patch in patches:
+            subprocess.run(["git", "apply", "--cached", "-"], cwd=host, env=env, input=patch, check=True)
+        paths = subprocess.check_output(["git", "diff", "--cached", "--name-only", "-z"],
+                                        cwd=host, env=env).decode().split("\0")
+        subprocess.run(["git", "diff", "--exit-code", "--quiet", "--", *filter(None, paths)],
+                       cwd=host, env=env, check=True)
+
+
 def prepare(output, origin):
     android_patch, bridge_patch, common_patch = [
         (ANDROID / name).read_bytes().replace(b"\r\n", b"\n") for name in
@@ -53,9 +67,8 @@ def prepare(output, origin):
             raise ValueError(f"Unmanaged source directory: {host}. Choose another --output.")
         check_revision(host)
         check_revision(host / COMMON, COMMON_PIN)
-        apply_patch(host, android_patch, "--check", "--reverse")
-        apply_patch(host, bridge_patch, "--check", "--reverse")
-        apply_patch(host / COMMON, common_patch, "--check", "--reverse")
+        verify_patches(host, android_patch, bridge_patch)
+        verify_patches(host / COMMON, common_patch)
     else:
         with tempfile.TemporaryDirectory(dir=output) as tmp:
             checkout = Path(tmp) / "moonlight"

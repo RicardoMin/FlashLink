@@ -32,16 +32,18 @@ import java.util.function.Supplier;
 final class FlashLinkQualityDialog {
     private final FlashLinkGame game;
     private final FlashLinkQuality active;
-    private final FlashLinkLiveSetting.State bitrateState, fpsState;
+    private final FlashLinkLiveSetting.State bitrateState, fpsState, sizeState;
     private final AlertDialog.Builder builder;
     private final LinearLayout form;
 
     FlashLinkQualityDialog(FlashLinkGame game, FlashLinkQuality active,
-                           FlashLinkLiveSetting.State bitrateState, FlashLinkLiveSetting.State fpsState) {
+                           FlashLinkLiveSetting.State bitrateState, FlashLinkLiveSetting.State fpsState,
+                           FlashLinkLiveSetting.State sizeState) {
         this.game = game;
         this.active = active;
         this.bitrateState = bitrateState;
         this.fpsState = fpsState;
+        this.sizeState = sizeState;
         builder = new AlertDialog.Builder(game);
         form = new LinearLayout(builder.getContext());
         form.setOrientation(LinearLayout.VERTICAL);
@@ -101,7 +103,8 @@ final class FlashLinkQualityDialog {
         custom.setSelectAllOnFocus(true);
         custom.setVisibility(View.GONE);
         form.addView(custom);
-        if (bitrateState == FlashLinkLiveSetting.State.UNKNOWN || fpsState == FlashLinkLiveSetting.State.UNKNOWN) {
+        if (bitrateState == FlashLinkLiveSetting.State.UNKNOWN || fpsState == FlashLinkLiveSetting.State.UNKNOWN ||
+                sizeState == FlashLinkLiveSetting.State.UNKNOWN) {
             TextView warning = new TextView(builder.getContext());
             warning.setText("部分串流设置未确认。这里显示上次确认的设置。");
             form.addView(warning);
@@ -173,7 +176,10 @@ final class FlashLinkQualityDialog {
     private boolean canApplyLive(FlashLinkQuality selected) {
         return active.canApplyLive(selected, bitrateState == FlashLinkLiveSetting.State.READY,
                 fpsState == FlashLinkLiveSetting.State.READY && FlashLinkLiveSetting.Kind.FRAME_RATE.valid(selected.fps)
-                        && (selected.fps == active.fps || canKeepDisplayMode(selected.fps)));
+                        && (selected.fps == active.fps || canKeepDisplayMode(selected.fps)),
+                sizeState == FlashLinkLiveSetting.State.READY &&
+                        FlashLinkResolution.valid(FlashLinkResolution.pack(selected.width, selected.height)) &&
+                        game.supportsLiveSize(selected.width, selected.height));
     }
 
     private boolean canKeepDisplayMode(int fps) {

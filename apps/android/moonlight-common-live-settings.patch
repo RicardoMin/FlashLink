@@ -1,7 +1,7 @@
 diff --git a/src/ControlStream.c b/src/ControlStream.c
 --- a/src/ControlStream.c
 +++ b/src/ControlStream.c
-@@ -17,6 +17,11 @@
+@@ -17,6 +17,13 @@
      unsigned short type;
      unsigned short payloadLength;
  } NVCTL_ENET_PACKET_HEADER_V2, *PNVCTL_ENET_PACKET_HEADER_V2;
@@ -10,10 +10,12 @@ diff --git a/src/ControlStream.c b/src/ControlStream.c
 +#define FLASHLINK_BITRATE_RESULT  0x6A41
 +#define FLASHLINK_FPS_REQUEST     0x6A42
 +#define FLASHLINK_FPS_RESULT      0x6A43
++#define FLASHLINK_SIZE_REQUEST    0x6A44
++#define FLASHLINK_SIZE_RESULT     0x6A45
  
  #define AES_GCM_TAG_LENGTH 16
  typedef struct _NVCTL_ENCRYPTED_PACKET_HEADER {
-@@ -62,6 +67,11 @@
+@@ -62,6 +69,11 @@
              uint8_t g;
              uint8_t b;
          } setControllerLed;
@@ -25,10 +27,14 @@ diff --git a/src/ControlStream.c b/src/ControlStream.c
      } data;
      LINKED_BLOCKING_QUEUE_ENTRY entry;
  } QUEUED_ASYNC_CALLBACK, *PQUEUED_ASYNC_CALLBACK;
-@@ -950,6 +960,14 @@
+@@ -950,6 +962,18 @@
              ListenerCallbacks.setHdrMode(hdrEnabled);
              break;
  
++        case FLASHLINK_SIZE_RESULT:
++            ListenerCallbacks.resolutionResult(queuedCb->data.setting.id, queuedCb->data.setting.status,
++                                               queuedCb->data.setting.value);
++            break;
 +        case FLASHLINK_FPS_RESULT:
 +            ListenerCallbacks.frameRateResult(queuedCb->data.setting.id, queuedCb->data.setting.status,
 +                                              queuedCb->data.setting.value);
@@ -40,24 +46,25 @@ diff --git a/src/ControlStream.c b/src/ControlStream.c
          case IDX_SET_MOTION_EVENT:
              // These events are infrequent and cannot be batched
              ListenerCallbacks.setMotionEventState(queuedCb->data.setMotionEventState.controllerNumber,
-@@ -967,7 +985,10 @@
+@@ -967,7 +991,11 @@
  }
  
  static bool needsAsyncCallback(unsigned short packetType) {
 -    return packetType == packetTypes[IDX_RUMBLE_DATA] ||
 +    return (IS_SUNSHINE() && encryptedControlStream &&
 +            ((packetType == FLASHLINK_BITRATE_RESULT && ListenerCallbacks.bitrateResult != NULL) ||
-+             (packetType == FLASHLINK_FPS_RESULT && ListenerCallbacks.frameRateResult != NULL))) ||
++             (packetType == FLASHLINK_FPS_RESULT && ListenerCallbacks.frameRateResult != NULL) ||
++             (packetType == FLASHLINK_SIZE_RESULT && ListenerCallbacks.resolutionResult != NULL))) ||
 +           packetType == packetTypes[IDX_RUMBLE_DATA] ||
             packetType == packetTypes[IDX_RUMBLE_TRIGGER_DATA] ||
             packetType == packetTypes[IDX_SET_MOTION_EVENT] ||
             packetType == packetTypes[IDX_SET_RGB_LED] ||
-@@ -988,7 +1009,17 @@
+@@ -988,7 +1016,17 @@
  
      BbInitializeWrappedBuffer(&bb, (char*)ctlHdr, sizeof(*ctlHdr), packetLength - sizeof(*ctlHdr), BYTE_ORDER_LITTLE);
  
 -    if (ctlHdr->type == packetTypes[IDX_RUMBLE_DATA]) {
-+    if (ctlHdr->type == FLASHLINK_BITRATE_RESULT || ctlHdr->type == FLASHLINK_FPS_RESULT) {
++    if (ctlHdr->type == FLASHLINK_BITRATE_RESULT || ctlHdr->type == FLASHLINK_FPS_RESULT || ctlHdr->type == FLASHLINK_SIZE_RESULT) {
 +        if (packetLength != (int)sizeof(*ctlHdr) + 12 ||
 +                !BbGet32(&bb, &queuedCb->data.setting.id) ||
 +                !BbGet32(&bb, &queuedCb->data.setting.status) ||
@@ -71,7 +78,7 @@ diff --git a/src/ControlStream.c b/src/ControlStream.c
          BbAdvanceBuffer(&bb, 4);
  
          BbGet16(&bb, &queuedCb->data.rumble.controllerNumber);
-@@ -1577,6 +1608,27 @@
+@@ -1577,6 +1615,31 @@
      return 0;
  }
  
@@ -91,6 +98,10 @@ diff --git a/src/ControlStream.c b/src/ControlStream.c
 +    return sendLiveSettingRequest(FLASHLINK_BITRATE_REQUEST, id, kbps);
 +}
 +
++int LiSendResolutionRequest(uint32_t id, uint32_t size) {
++    return sendLiveSettingRequest(FLASHLINK_SIZE_REQUEST, id, size);
++}
++
 +int LiSendFrameRateRequest(uint32_t id, uint32_t fps) {
 +    if (fps > 240) return -1;
 +    return sendLiveSettingRequest(FLASHLINK_FPS_REQUEST, id, fps);
@@ -102,16 +113,17 @@ diff --git a/src/ControlStream.c b/src/ControlStream.c
 diff --git a/src/Limelight.h b/src/Limelight.h
 --- a/src/Limelight.h
 +++ b/src/Limelight.h
-@@ -479,6 +479,8 @@
+@@ -479,6 +479,9 @@
      ConnListenerRumbleTriggers rumbleTriggers;
      ConnListenerSetMotionEventState setMotionEventState;
      ConnListenerSetControllerLED setControllerLED;
 +    void (*bitrateResult)(uint32_t id, uint32_t status, uint32_t kbps);
++    void (*resolutionResult)(uint32_t id, uint32_t status, uint32_t size);
 +    void (*frameRateResult)(uint32_t id, uint32_t status, uint32_t fps);
  } CONNECTION_LISTENER_CALLBACKS, *PCONNECTION_LISTENER_CALLBACKS;
  
  // Use this function to zero the connection callbacks when allocated on the stack or heap
-@@ -547,6 +549,13 @@
+@@ -547,6 +550,16 @@
  
  // This function queues a relative mouse move event to be sent to the remote server.
  int LiSendMouseMoveEvent(short deltaX, short deltaY);
@@ -119,6 +131,9 @@ diff --git a/src/Limelight.h b/src/Limelight.h
 +// Query (kbps == 0) or update a paired Sunshine session's target bandwidth.
 +// Serialize with connection start/stop. The bitrateResult callback confirms the host state.
 +int LiSendBitrateRequest(uint32_t id, uint32_t kbps);
++
++// Query (size == 0) or set a packed stream size (width in high 16 bits).
++int LiSendResolutionRequest(uint32_t id, uint32_t size);
 +
 +// Query (fps == 0) or update the same session's frame rate. Replies use frameRateResult.
 +int LiSendFrameRateRequest(uint32_t id, uint32_t fps);

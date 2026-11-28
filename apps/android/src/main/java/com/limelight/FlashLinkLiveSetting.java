@@ -4,11 +4,13 @@ package com.limelight;
 /** Owns one player's requests. All calls and callbacks are serialized on the UI thread. */
 final class FlashLinkLiveSetting {
     enum Kind {
-        BITRATE(500, 150000), FRAME_RATE(1, 240);
+        BITRATE(500, 150000), FRAME_RATE(1, 240), RESOLUTION(0, 0);
 
         private final int min, max;
         Kind(int min, int max) { this.min = min; this.max = max; }
-        boolean valid(int value) { return value >= min && value <= max; }
+        boolean valid(int value) {
+            return this == RESOLUTION ? FlashLinkResolution.valid(value) : value >= min && value <= max;
+        }
     }
 
     enum State { NEW, PROBING, READY, SETTING, VERIFYING, UNKNOWN, UNAVAILABLE, CLOSED }

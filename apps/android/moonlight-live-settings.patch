@@ -17,7 +17,7 @@ diff --git a/app/src/main/java/com/limelight/Game.java b/app/src/main/java/com/l
                  new CrashListener() {
                      @Override
                      public void notifyCrash(Exception e) {
-@@ -1184,6 +1186,19 @@
+@@ -1184,6 +1186,43 @@
          finish();
      }
  
@@ -25,6 +25,30 @@ diff --git a/app/src/main/java/com/limelight/Game.java b/app/src/main/java/com/l
 +    protected final void updateStreamBitrate(int kbps, boolean remember) {
 +        prefConfig.bitrate = kbps;
 +        if (remember) PreferenceConfiguration.saveStreamBitrate(this, kbps);
++    }
++
++    protected final boolean supportsLiveSize(int width, int height) {
++        return decoderRenderer.supportsLiveSize(width, height);
++    }
++
++    protected final void updateStreamSize(int width, int height) {
++        prefConfig.width = width;
++        prefConfig.height = height;
++        if (prefConfig.stretchVideo) {
++            streamView.getHolder().setFixedSize(width, height);
++        } else {
++            streamView.getHolder().setSizeFromLayout();
++            streamView.setDesiredAspectRatio((double) width / height);
++            streamView.requestLayout();
++        }
++    }
++
++    protected final void confirmNextOutputAt(int size) {
++        decoderRenderer.confirmNextOutputAt(size);
++    }
++
++    protected final void setDecoderResizing(boolean pending) {
++        decoderRenderer.setResizing(pending);
 +    }
 +
 +    protected final void updateStreamFrameRate(int fps, boolean remember) {
@@ -37,7 +61,30 @@ diff --git a/app/src/main/java/com/limelight/Game.java b/app/src/main/java/com/l
      private void setInputGrabState(boolean grab) {
          // Grab/ungrab the mouse cursor
          if (grab) {
-@@ -2646,37 +2661,25 @@
+@@ -2305,6 +2344,22 @@
+     public void stageComplete(String stage) {
+     }
+ 
++    @Override public void onStreamSizeChanged(int width, int height) {
++        runOnUiThread(() -> {
++            if (connected && !stopInProgress && !isFinishing()) onStreamSizePresented(width, height);
++        });
++    }
++
++    protected void onStreamSizePresented(int width, int height) {}
++
++    @Override public void onOversizedStreamFrame(int size) {
++        runOnUiThread(() -> {
++            if (connected && !stopInProgress && !isFinishing()) recoverOversizedStream(size);
++        });
++    }
++
++    protected void recoverOversizedStream(int size) {}
++
+     @Override public void onFirstFrameSubmitted(int width, int height, int fps) {
+         FlashLinkQuality active = new FlashLinkQuality(width, height, fps, prefConfig.bitrate);
+         runOnUiThread(() -> {
+@@ -2646,37 +2701,25 @@
  
      @Override
      public void surfaceCreated(SurfaceHolder holder) {
@@ -96,15 +143,16 @@ diff --git a/app/src/main/java/com/limelight/Game.java b/app/src/main/java/com/l
 diff --git a/app/src/main/java/com/limelight/binding/video/MediaCodecDecoderRenderer.java b/app/src/main/java/com/limelight/binding/video/MediaCodecDecoderRenderer.java
 --- a/app/src/main/java/com/limelight/binding/video/MediaCodecDecoderRenderer.java
 +++ b/app/src/main/java/com/limelight/binding/video/MediaCodecDecoderRenderer.java
-@@ -14,6 +14,7 @@
+@@ -14,6 +14,8 @@
  import org.jcodec.codecs.h264.io.model.VUIParameters;
  
  import com.limelight.BuildConfig;
++import com.limelight.FlashLinkDecoderBounds;
 +import com.limelight.FlashLinkFrameRate;
  import com.limelight.LimeLog;
  import com.limelight.R;
  import com.limelight.nvstream.av.video.VideoDecoderRenderer;
-@@ -68,6 +69,7 @@
+@@ -68,6 +70,7 @@
      private boolean refFrameInvalidationAvc, refFrameInvalidationHevc, refFrameInvalidationAv1;
      private byte optimalSlicesPerFrame;
      private boolean refFrameInvalidationActive;
@@ -112,7 +160,45 @@ diff --git a/app/src/main/java/com/limelight/binding/video/MediaCodecDecoderRend
      private int initialWidth, initialHeight;
      private int videoFormat;
      private SurfaceHolder renderTarget;
-@@ -114,7 +116,15 @@
+@@ -98,7 +101,36 @@
+ 
+     private MediaFormat inputFormat;
+     private MediaFormat outputFormat;
+-    private boolean firstFrameSubmitted;
++    private volatile int presentedSize;
++    private int decoderOutputSize;
++    private final AtomicInteger confirmOutputAt = new AtomicInteger();
++    private volatile boolean resizing;
++    private volatile boolean sizeChanged;
++    private int oversizedPictures;
++
++    public void confirmNextOutputAt(int size) { confirmOutputAt.set(size); }
++    public void setResizing(boolean pending) { resizing = pending; }
++    private volatile int adaptiveWidth, adaptiveHeight;
++    private volatile MediaCodecInfo.VideoCapabilities sizeCaps;
++
++    public boolean supportsLiveSize(int width, int height) {
++        MediaCodecInfo.VideoCapabilities caps = sizeCaps;
++        return caps != null && width <= adaptiveWidth && height <= adaptiveHeight
++                && caps.areSizeAndRateSupported(width, height, refreshRate);
++    }
++
++    private FlashLinkDecoderBounds chooseAdaptiveBounds(MediaCodecInfo info, String mime) {
++        sizeCaps = null;
++        if (!adaptivePlayback || !fusedIdrFrame || !"video/avc".equals(mime)) {
++            return new FlashLinkDecoderBounds(initialWidth, initialHeight, 0, null);
++        }
++        sizeCaps = info.getCapabilitiesForType(mime).getVideoCapabilities();
++        android.app.ActivityManager manager = (android.app.ActivityManager)
++                activity.getSystemService(android.content.Context.ACTIVITY_SERVICE);
++        int maxLongEdge = manager.isLowRamDevice() ? 1920 : 4096;
++        return new FlashLinkDecoderBounds(initialWidth, initialHeight, maxLongEdge,
++                (width, height) -> sizeCaps.areSizeAndRateSupported(width, height, refreshRate));
++    }
+     private MediaFormat configuredFormat;
+ 
+     private boolean needsBaselineSpsHack;
+@@ -114,10 +146,24 @@
  
      private long lastTimestampUs;
      private int lastFrameNumber;
@@ -128,8 +214,18 @@ diff --git a/app/src/main/java/com/limelight/binding/video/MediaCodecDecoderRend
 +
      private PreferenceConfiguration prefs;
  
-     private LinkedBlockingQueue<Integer> outputBufferQueue = new LinkedBlockingQueue<>();
-@@ -295,7 +305,7 @@
+-    private LinkedBlockingQueue<Integer> outputBufferQueue = new LinkedBlockingQueue<>();
++    // A buffered frame keeps its own dimensions across INFO_OUTPUT_FORMAT_CHANGED.
++    private static final class OutputFrame {
++        final int index, size;
++        OutputFrame(int index, int size) { this.index = index; this.size = size; }
++    }
++
++    private final LinkedBlockingQueue<OutputFrame> outputBufferQueue = new LinkedBlockingQueue<>();
+     private static final int OUTPUT_BUFFER_QUEUE_LIMIT = 2;
+     private long lastRenderedFrameTimeNanos;
+     private HandlerThread choreographerHandlerThread;
+@@ -295,7 +341,7 @@
          this.renderTarget = renderTarget;
      }
  
@@ -138,7 +234,7 @@ diff --git a/app/src/main/java/com/limelight/binding/video/MediaCodecDecoderRend
                                       CrashListener crashListener, int consecutiveCrashCount,
                                       boolean meteredData, boolean requestedHdr,
                                       String glRenderer, PerfOverlayListener perfListener) {
-@@ -304,6 +314,7 @@
+@@ -304,6 +350,7 @@
          this.context = activity;
          this.activity = activity;
          this.prefs = prefs;
@@ -146,7 +242,105 @@ diff --git a/app/src/main/java/com/limelight/binding/video/MediaCodecDecoderRend
          this.crashListener = crashListener;
          this.consecutiveCrashCount = consecutiveCrashCount;
          this.glRenderer = glRenderer;
-@@ -1094,7 +1105,7 @@
+@@ -475,8 +522,13 @@
+         // Adaptive playback can also be enabled by the whitelist on pre-KitKat devices
+         // so we don't fill these pre-KitKat
+         if (adaptivePlayback && Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
+-            videoFormat.setInteger(MediaFormat.KEY_MAX_WIDTH, initialWidth);
+-            videoFormat.setInteger(MediaFormat.KEY_MAX_HEIGHT, initialHeight);
++            videoFormat.setInteger(MediaFormat.KEY_MAX_WIDTH, adaptiveWidth);
++            videoFormat.setInteger(MediaFormat.KEY_MAX_HEIGHT, adaptiveHeight);
++            if (adaptiveWidth > initialWidth || adaptiveHeight > initialHeight) {
++                // Size the compressed AVC access-unit buffer for the largest adaptive IDR.
++                int blocks = ((adaptiveWidth + 15) / 16) * ((adaptiveHeight + 15) / 16);
++                videoFormat.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, blocks * 192);
++            }
+         }
+ 
+         // Android 7.0 adds color options to the MediaFormat
+@@ -665,7 +717,11 @@
+         adaptivePlayback = MediaCodecHelper.decoderSupportsAdaptivePlayback(selectedDecoderInfo, mimeType);
+         fusedIdrFrame = MediaCodecHelper.decoderSupportsFusedIdrFrame(selectedDecoderInfo, mimeType);
+ 
+-        for (int tryNumber = 0;; tryNumber++) {
++        FlashLinkDecoderBounds bounds = chooseAdaptiveBounds(selectedDecoderInfo, mimeType);
++        while (true) {
++            int tryNumber = bounds.option();
++            adaptiveWidth = bounds.width();
++            adaptiveHeight = bounds.height();
+             LimeLog.info("Decoder configuration try: "+tryNumber);
+ 
+             MediaFormat mediaFormat = createBaseMediaFormat(mimeType);
+@@ -674,12 +730,12 @@
+             boolean newFormat = MediaCodecHelper.setDecoderLowLatencyOptions(mediaFormat, selectedDecoderInfo, tryNumber);
+ 
+             // Throw the underlying codec exception on the last attempt if the caller requested it
+-            if (tryConfigureDecoder(selectedDecoderInfo, mediaFormat, !newFormat && throwOnCodecError)) {
++            if (tryConfigureDecoder(selectedDecoderInfo, mediaFormat, bounds.atStartupSize() && !newFormat && throwOnCodecError)) {
+                 // Success!
+                 break;
+             }
+ 
+-            if (!newFormat) {
++            if (!bounds.retry(newFormat)) {
+                 // We couldn't even configure a decoder without any low latency options
+                 return -5;
+             }
+@@ -993,8 +1049,9 @@
+             // NB: Since the queue limit is 2, we won't starve the decoder of output buffers
+             // by holding onto them for too long. This also ensures we will have that 1 extra
+             // frame of buffer to smooth over network/rendering jitter.
+-            Integer nextOutputBuffer = outputBufferQueue.poll();
+-            if (nextOutputBuffer != null) {
++            OutputFrame frame = outputBufferQueue.poll();
++            if (frame != null) {
++                int nextOutputBuffer = frame.index;
+                 try {
+                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                         videoDecoder.releaseOutputBuffer(nextOutputBuffer, frameTimeNanos);
+@@ -1004,7 +1061,7 @@
+                     }
+ 
+                     lastRenderedFrameTimeNanos = frameTimeNanos;
+-                    frameSubmitted();
++                    frameSubmitted(frame.size);
+                 } catch (IllegalStateException ignored) {
+                     try {
+                         // Try to avoid leaking the output buffer by releasing it without rendering
+@@ -1054,15 +1111,24 @@
+         return format.containsKey(size) ? format.getInteger(size) : fallback;
+     }
+ 
+-    private void frameSubmitted() {
++    private void updateOutputSize() {
++        outputFormat = videoDecoder.getOutputFormat();
++        int width = visibleSize(outputFormat, MediaFormat.KEY_WIDTH, "crop-left", "crop-right", initialWidth);
++        int height = visibleSize(outputFormat, MediaFormat.KEY_HEIGHT, "crop-top", "crop-bottom", initialHeight);
++        decoderOutputSize = (width << 16) | height;
++        LimeLog.info("New output format: " + outputFormat);
++    }
++
++    private void frameSubmitted(int size) {
+         activeWindowVideoStats.totalFramesRendered++;
+-        if (!firstFrameSubmitted) {
+-            firstFrameSubmitted = true;
+-            MediaFormat format = outputFormat;
+-            int width = visibleSize(format, MediaFormat.KEY_WIDTH, "crop-left", "crop-right", initialWidth);
+-            int height = visibleSize(format, MediaFormat.KEY_HEIGHT, "crop-top", "crop-bottom", initialHeight);
+-            perfListener.onFirstFrameSubmitted(width, height, refreshRate);
+-        }
++        if (size == 0) size = (initialWidth << 16) | initialHeight;
++        int previous = presentedSize;
++        boolean requested = confirmOutputAt.get() == size && confirmOutputAt.compareAndSet(size, 0);
++        if (previous == size && !requested) return;
++        if (previous != 0 && previous != size) sizeChanged = true;
++        presentedSize = size;
++        if (previous == 0) perfListener.onFirstFrameSubmitted(size >>> 16, size & 0xffff, refreshRate);
++        else perfListener.onStreamSizeChanged(size >>> 16, size & 0xffff);
+     }
+ 
+     private void startRendererThread()
+@@ -1094,7 +1160,7 @@
                                  }
  
                                  if (prefs.framePacing == PreferenceConfiguration.FRAME_PACING_MAX_SMOOTHNESS ||
@@ -155,7 +349,68 @@ diff --git a/app/src/main/java/com/limelight/binding/video/MediaCodecDecoderRend
                                      // In max smoothness or cap FPS mode, we want to never drop frames
                                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
                                          // Use a PTS that will cause this frame to never be dropped
-@@ -1512,29 +1523,11 @@
+@@ -1115,7 +1181,9 @@
+                                     }
+                                 }
+ 
+-                                frameSubmitted();
++                                frameSubmitted(decoderOutputSize);
++                                // Draining the queue above may also have consumed a format-change notification.
++                                if (outIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) updateOutputSize();
+                             }
+                             else {
+                                 // For balanced frame pacing case, the Choreographer callback will handle rendering.
+@@ -1127,17 +1195,12 @@
+                                 // run for a while (if there is a huge mismatch between stream FPS and display
+                                 // refresh rate).
+                                 if (outputBufferQueue.size() == OUTPUT_BUFFER_QUEUE_LIMIT) {
+-                                    try {
+-                                        videoDecoder.releaseOutputBuffer(outputBufferQueue.take(), false);
+-                                    } catch (InterruptedException e) {
+-                                        // We're shutting down, so we can just drop this buffer on the floor
+-                                        // and it will be reclaimed when the codec is released.
+-                                        return;
+-                                    }
++                                    OutputFrame oldest = outputBufferQueue.poll();
++                                    if (oldest != null) videoDecoder.releaseOutputBuffer(oldest.index, false);
+                                 }
+ 
+                                 // Add this buffer
+-                                outputBufferQueue.add(lastIndex);
++                                outputBufferQueue.add(new OutputFrame(lastIndex, decoderOutputSize));
+                             }
+ 
+                             // Add delta time to the totals (excluding probable outliers)
+@@ -1153,9 +1216,7 @@
+                                 case MediaCodec.INFO_TRY_AGAIN_LATER:
+                                     break;
+                                 case MediaCodec.INFO_OUTPUT_FORMAT_CHANGED:
+-                                    LimeLog.info("Output format changed");
+-                                    outputFormat = videoDecoder.getOutputFormat();
+-                                    LimeLog.info("New output format: " + outputFormat);
++                                    updateOutputSize();
+                                     break;
+                                 default:
+                                     break;
+@@ -1446,7 +1507,7 @@
+         if (SystemClock.uptimeMillis() >= activeWindowVideoStats.measurementStartTimestamp + 1000) {
+             // Sample the same completed window as the on-screen overlay, even with the UI hidden.
+             long windowMs = SystemClock.uptimeMillis() - activeWindowVideoStats.measurementStartTimestamp;
+-            android.util.Log.i("FlashLinkSession", "VIDEO width=" + initialWidth + " height=" + initialHeight
++            android.util.Log.i("FlashLinkSession", "VIDEO width=" + (presentedSize >>> 16) + " height=" + (presentedSize & 0xffff)
+                     + " window_ms=" + windowMs + " received=" + activeWindowVideoStats.totalFramesReceived
+                     + " rendered=" + activeWindowVideoStats.totalFramesRendered + " lost=" + activeWindowVideoStats.framesLost
+                     + " decode_ms_total=" + activeWindowVideoStats.decoderTimeMs);
+@@ -1470,7 +1531,7 @@
+                 float decodeTimeMs = (float)lastTwo.decoderTimeMs / lastTwo.totalFramesReceived;
+                 long rttInfo = MoonBridge.getEstimatedRttInfo();
+                 StringBuilder sb = new StringBuilder();
+-                sb.append(context.getString(R.string.perf_overlay_streamdetails, initialWidth + "x" + initialHeight, fps.totalFps)).append('\n');
++                sb.append(context.getString(R.string.perf_overlay_streamdetails, (presentedSize >>> 16) + "x" + (presentedSize & 0xffff), fps.totalFps)).append('\n');
+                 sb.append(context.getString(R.string.perf_overlay_decoder, decoder)).append('\n');
+                 sb.append(context.getString(R.string.perf_overlay_incomingfps, fps.receivedFps)).append('\n');
+                 sb.append(context.getString(R.string.perf_overlay_renderingfps, fps.renderedFps)).append('\n');
+@@ -1512,29 +1573,11 @@
                  // Annex B NALUs (including NALUs with escape sequences)
                  SeqParameterSet sps = H264Utils.readSPS(spsBuf);
  
@@ -190,13 +445,37 @@ diff --git a/app/src/main/java/com/limelight/binding/video/MediaCodecDecoderRend
                  }
  
                  // TI OMAP4 requires a reference frame count of 1 to decode successfully. Exynos 4
+@@ -1759,6 +1802,14 @@
+         numFramesIn++;
+ 
+         if (decodeUnitLength > nextInputBuffer.limit() - nextInputBuffer.position()) {
++            int size = presentedSize;
++            if (resizing || sizeChanged) {
++                // Some codecs ignore KEY_MAX_INPUT_SIZE. Request a replacement IDR once.
++                // Persistent failures after confirmation need the previous working geometry.
++                if (!resizing && ++oversizedPictures == 2) perfListener.onOversizedStreamFrame(size);
++                nextInputBuffer.clear();
++                return MoonBridge.DR_NEED_IDR;
++            }
+             IllegalArgumentException exception = new IllegalArgumentException(
+                     "Decode unit length "+decodeUnitLength+" too large for input buffer "+nextInputBuffer.limit());
+             if (!reportedCrash) {
+@@ -1771,6 +1822,7 @@
+         // Copy data from our buffer list into the input buffer
+         nextInputBuffer.put(decodeUnitData, 0, decodeUnitLength);
+ 
++        oversizedPictures = 0;
+         if (!queueNextInputBuffer(timestampUs, codecFlags)) {
+             return MoonBridge.DR_NEED_IDR;
+         }
 diff --git a/app/src/main/java/com/limelight/nvstream/NvConnectionListener.java b/app/src/main/java/com/limelight/nvstream/NvConnectionListener.java
 --- a/app/src/main/java/com/limelight/nvstream/NvConnectionListener.java
 +++ b/app/src/main/java/com/limelight/nvstream/NvConnectionListener.java
-@@ -19,5 +19,7 @@
+@@ -19,5 +19,8 @@
  
      void setMotionEventState(short controllerNumber, byte motionType, short reportRateHz);
  
++    default void resolutionResult(int id, int status, int size) {}
 +    default void frameRateResult(int id, int status, int fps) {}
 +    default void bitrateResult(int id, int status, int kbps) {}
      void setControllerLED(short controllerNumber, byte r, byte g, byte b);
@@ -204,7 +483,7 @@ diff --git a/app/src/main/java/com/limelight/nvstream/NvConnectionListener.java 
 diff --git a/app/src/main/java/com/limelight/nvstream/jni/MoonBridge.java b/app/src/main/java/com/limelight/nvstream/jni/MoonBridge.java
 --- a/app/src/main/java/com/limelight/nvstream/jni/MoonBridge.java
 +++ b/app/src/main/java/com/limelight/nvstream/jni/MoonBridge.java
-@@ -326,6 +326,28 @@
+@@ -326,6 +326,38 @@
          }
      }
  
@@ -227,6 +506,16 @@ diff --git a/app/src/main/java/com/limelight/nvstream/jni/MoonBridge.java b/app/
 +        return connectionListener == owner && sendFrameRateRequest(id, fps) == 0;
 +    }
 +
++    public static void bridgeClResolutionResult(int id, int status, int size) {
++        NvConnectionListener listener = connectionListener;
++        if (listener != null) listener.resolutionResult(id, status, size);
++    }
++
++    public static synchronized boolean requestResolution(NvConnectionListener owner, int id, int size) {
++        return connectionListener == owner && sendResolutionRequest(id, size) == 0;
++    }
++
++    private static native int sendResolutionRequest(int id, int size);
 +    private static native int sendFrameRateRequest(int id, int fps);
 +    private static native int sendBitrateRequest(int id, int kbps);
 +
@@ -236,10 +525,16 @@ diff --git a/app/src/main/java/com/limelight/nvstream/jni/MoonBridge.java b/app/
 diff --git a/app/src/main/java/com/limelight/preferences/PreferenceConfiguration.java b/app/src/main/java/com/limelight/preferences/PreferenceConfiguration.java
 --- a/app/src/main/java/com/limelight/preferences/PreferenceConfiguration.java
 +++ b/app/src/main/java/com/limelight/preferences/PreferenceConfiguration.java
-@@ -351,6 +351,19 @@
+@@ -351,6 +351,25 @@
                  prefs.getString(FPS_PREF_STRING, DEFAULT_FPS));
      }
  
++    public static void saveStreamSize(Context context, int width, int height) {
++        PreferenceManager.getDefaultSharedPreferences(context).edit()
++                .putString(RESOLUTION_PREF_STRING, width + "x" + height)
++                .apply();
++    }
++
 +    public static void saveStreamFrameRate(Context context, int fps) {
 +        PreferenceManager.getDefaultSharedPreferences(context).edit()
 +                .putString(FPS_PREF_STRING, Integer.toString(fps))
@@ -259,25 +554,27 @@ diff --git a/app/src/main/java/com/limelight/preferences/PreferenceConfiguration
 diff --git a/app/src/main/jni/moonlight-core/callbacks.c b/app/src/main/jni/moonlight-core/callbacks.c
 --- a/app/src/main/jni/moonlight-core/callbacks.c
 +++ b/app/src/main/jni/moonlight-core/callbacks.c
-@@ -37,6 +37,8 @@
+@@ -37,6 +37,9 @@
  static jmethodID BridgeClRumbleTriggersMethod;
  static jmethodID BridgeClSetMotionEventStateMethod;
  static jmethodID BridgeClSetControllerLEDMethod;
 +static jmethodID BridgeClBitrateResultMethod;
++static jmethodID BridgeClResolutionResultMethod;
 +static jmethodID BridgeClFrameRateResultMethod;
  static jbyteArray DecodedFrameBuffer;
  static jshortArray DecodedAudioBuffer;
  
-@@ -100,6 +102,8 @@
+@@ -100,6 +103,9 @@
      BridgeClSetHdrModeMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClSetHdrMode", "(Z[B)V");
      BridgeClRumbleTriggersMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClRumbleTriggers", "(SSS)V");
      BridgeClSetMotionEventStateMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClSetMotionEventState", "(SBS)V");
++    BridgeClResolutionResultMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClResolutionResult", "(III)V");
 +    BridgeClFrameRateResultMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClFrameRateResult", "(III)V");
 +    BridgeClBitrateResultMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClBitrateResult", "(III)V");
      BridgeClSetControllerLEDMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClSetControllerLED", "(SBBB)V");
  }
  
-@@ -377,6 +381,26 @@
+@@ -377,6 +383,36 @@
      }
  }
  
@@ -289,6 +586,16 @@ diff --git a/app/src/main/jni/moonlight-core/callbacks.c b/app/src/main/jni/moon
 +JNIEXPORT jint JNICALL
 +Java_com_limelight_nvstream_jni_MoonBridge_sendFrameRateRequest(JNIEnv* env, jclass clazz, jint id, jint fps) {
 +    return LiSendFrameRateRequest((uint32_t)id, (uint32_t)fps);
++}
++
++static void BridgeClResolutionResult(uint32_t id, uint32_t status, uint32_t size) {
++    JNIEnv* env = GetThreadEnv();
++    (*env)->CallStaticVoidMethod(env, GlobalBridgeClass, BridgeClResolutionResultMethod, (jint)id, (jint)status, (jint)size);
++}
++
++JNIEXPORT jint JNICALL
++Java_com_limelight_nvstream_jni_MoonBridge_sendResolutionRequest(JNIEnv* env, jclass clazz, jint id, jint size) {
++    return LiSendResolutionRequest((uint32_t)id, (uint32_t)size);
 +}
 +
 +static void BridgeClBitrateResult(uint32_t id, uint32_t status, uint32_t kbps) {
@@ -304,12 +611,25 @@ diff --git a/app/src/main/jni/moonlight-core/callbacks.c b/app/src/main/jni/moon
  void BridgeClSetControllerLED(uint16_t controllerNumber, uint8_t r, uint8_t g, uint8_t b) {
      JNIEnv* env = GetThreadEnv();
  
-@@ -413,6 +437,8 @@
+@@ -413,6 +449,9 @@
  };
  
  static CONNECTION_LISTENER_CALLBACKS BridgeConnListenerCallbacks = {
 +        .bitrateResult = BridgeClBitrateResult,
++        .resolutionResult = BridgeClResolutionResult,
 +        .frameRateResult = BridgeClFrameRateResult,
          .stageStarting = BridgeClStageStarting,
          .stageComplete = BridgeClStageComplete,
          .stageFailed = BridgeClStageFailed,
+diff --git a/app/src/main/java/com/limelight/binding/video/PerfOverlayListener.java b/app/src/main/java/com/limelight/binding/video/PerfOverlayListener.java
+--- a/app/src/main/java/com/limelight/binding/video/PerfOverlayListener.java
++++ b/app/src/main/java/com/limelight/binding/video/PerfOverlayListener.java
+@@ -1,6 +1,8 @@
+ package com.limelight.binding.video;
+ 
+ public interface PerfOverlayListener {
++    void onStreamSizeChanged(int width, int height);
++    void onOversizedStreamFrame(int size);
+     void onFirstFrameSubmitted(int width, int height, int fps);
+     void onPerfUpdate(final String text);
+ }
