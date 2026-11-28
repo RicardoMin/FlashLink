@@ -51,9 +51,28 @@ index 9d13f4b..d04243e 100644
          }
          release {
              // To whomever is releasing/using an APK in release mode with
-@@ -136,6 +136,7 @@ android {
+@@ -122,6 +123,6 @@ android {
+             // TL;DR: Leave the following line alone!
+             applicationIdSuffix ".unofficial"
+-            resValue "string", "app_label", "Moonlight"
++            resValue "string", "app_label", "FlashLink"
+             resValue "string", "app_label_root", "Moonlight (Root)"
+ 
+             minifyEnabled true
+@@ -136,6 +137,18 @@ android {
  }
  
++androidComponents.onVariants(androidComponents.selector().withBuildType('release')) { variant ->
++    // Assign the public FlashLink identity only to the distributed non-root variant.
++    if (variant.name == 'nonRootRelease') {
++        variant.applicationId.set('io.github.ricardomin.flashlink')
++        variant.outputs.each { output ->
++            output.versionName.set('0.3.0')
++            output.versionCode.set(317)
++        }
++    }
++}
++
  dependencies {
 +    implementation project.property('flashlinkFlutterArtifact')
      implementation 'org.bouncycastle:bcprov-jdk15on:1.70'

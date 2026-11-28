@@ -226,10 +226,13 @@ def android_report(adb):
     devices = adb_run("get-state")
     if devices.returncode or devices.stdout.strip() != "device":
         return {"status": "unavailable", "reason": "select_one_authorized_device_with_ANDROID_SERIAL"}
-    version = adb_run("shell", "dumpsys", "package", "dev.flashlink.demo.debug")
-    installed = re.search(r"\bversionCode=(\d+)", version.stdout)
-    if not installed:
-        return {"status": "unavailable", "reason": "flashlink_demo_missing"}
+    for package in ("io.github.ricardomin.flashlink", "dev.flashlink.demo.debug"):
+        version = adb_run("shell", "dumpsys", "package", package)
+        installed = re.search(r"\bversionCode=(\d+)", version.stdout)
+        if installed:
+            break
+    else:
+        return {"status": "unavailable", "reason": "flashlink_package_missing"}
     uid = re.search(r"\b(?:userId|appId)=(\d+)", version.stdout)
     switches = []
     if uid and "--uid" in adb_run("logcat", "--help").stdout:
@@ -240,8 +243,9 @@ def android_report(adb):
     if log.returncode:
         return {"status": "unavailable", "reason": "logcat_failed"}
     result = android_samples(log.stdout.splitlines())
+    result["android_package"] = package
     result["android_build_code"] = int(installed[1])
-    paths = adb_run("shell", "pm", "path", "dev.flashlink.demo.debug")
+    paths = adb_run("shell", "pm", "path", package)
     if paths.returncode == 0:
         for line in paths.stdout.splitlines():
             # Android's shell reconstructs its arguments as a command. Accept only

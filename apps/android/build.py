@@ -3,6 +3,7 @@
 
 import argparse
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -22,6 +23,7 @@ COMMON = Path("app/src/main/jni/moonlight-core/moonlight-common-c")
 ORIGIN = "https://github.com/moonlight-stream/moonlight-android.git"
 MODULE = ROOT / "apps/flashlink"
 RUST_TARGET = "aarch64-linux-android"
+RELEASE_CERT_SHA256 = "aed857abe3a382a0d61111bc9f69df5edcff7ee1f73027a28d773816c52f6bbf"
 
 
 def run(args, cwd, env=None):
@@ -137,7 +139,36 @@ def copy_apk(source, destination):
     print(f"APK: {destination}")
 
 
-def build(output, host):
+def sign_release(apk, config, destination, official):
+    # Gradle only builds the unsigned APK. Pass secrets solely to apksigner
+    # so they cannot be persisted in Gradle's task metadata or daemon state.
+    credentials = json.loads(config.read_text(encoding="utf-8-sig"))
+    fields = ("storeFile", "keyAlias", "storePassword", "keyPassword")
+    if not isinstance(credentials, dict) or not all(isinstance(credentials.get(k), str) and credentials[k] for k in fields):
+        raise ValueError("Signing config must supply storeFile, keyAlias, storePassword and keyPassword.")
+    keystore = (config.parent / credentials["storeFile"]).resolve(strict=True)
+    sdk = os.environ.get("ANDROID_HOME") or os.environ.get("ANDROID_SDK_ROOT")
+    if not sdk:
+        raise ValueError("Set ANDROID_HOME to the Android SDK with Build Tools 36.0.0 installed.")
+    signer = Path(sdk) / "build-tools/36.0.0/lib/apksigner.jar"
+    java = Path(os.environ["JAVA_HOME"]) / "bin/java" if os.environ.get("JAVA_HOME") else "java"
+    command = [str(java), "-jar", str(signer)]
+    with tempfile.TemporaryDirectory(dir=destination.parent) as tmp:
+        signed = Path(tmp) / destination.name
+        env = {**os.environ, "FLASHLINK_STORE_PASS": credentials["storePassword"],
+               "FLASHLINK_KEY_PASS": credentials["keyPassword"]}
+        subprocess.run([*command, "sign", "--ks", keystore, "--ks-key-alias", credentials["keyAlias"],
+                        "--ks-pass", "env:FLASHLINK_STORE_PASS", "--key-pass", "env:FLASHLINK_KEY_PASS",
+                        "--v4-signing-enabled", "false", "--out", signed, apk], env=env, check=True)
+        report = subprocess.check_output([*command, "verify", "--print-certs", signed], text=True)
+        signers = re.findall(r"^Signer #\d+ certificate SHA-256 digest: ([0-9a-fA-F]+)$", report, re.M)
+        if len(signers) != 1 or (official and signers[0].lower() != RELEASE_CERT_SHA256):
+            raise ValueError("Unexpected signing certificate for the release APK.")
+        print(f"Verified APK signer SHA-256: {signers[0]}")
+        signed.replace(destination)
+
+
+def build(output, host, signing_config=None, official=False):
     compiler, version = android_ndk()
     rust_env = os.environ.copy()
     rust_env["CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER"] = str(compiler)
@@ -156,23 +187,33 @@ def build(output, host):
     repo = MODULE / "build/host/outputs/repo"
     artifact, aar = flutter_artifact(repo)
     gradle = host / ("gradlew.bat" if os.name == "nt" else "gradlew")
-    run([gradle, ":app:assembleNonRootDebug", f"-PflashlinkNdkVersion={version}",
+    variant = "release" if signing_config else "debug"
+    run([gradle, f":app:assembleNonRoot{variant.title()}", f"-PflashlinkNdkVersion={version}",
          f"-PflashlinkJavaSrc={ANDROID / 'src/main/java'}",
          f"-PflashlinkFlutterArtifact={artifact}", f"-PflashlinkFlutterRepo={repo}"], host)
-    apk = host / "app/build/outputs/apk/nonRoot/debug/app-nonRoot-debug.apk"
+    suffix = "-unsigned" if signing_config else ""
+    apk = host / f"app/build/outputs/apk/nonRoot/{variant}/app-nonRoot-{variant}{suffix}.apk"
     with zipfile.ZipFile(apk) as package:
         required = {"libflutter.so", "libapp.so", "libflashlink_client.so", "libmoonlight-core.so"}
         missing = [name for name in required if f"lib/arm64-v8a/{name}" not in package.namelist()]
         if missing:
             raise ValueError("Incomplete APK. Missing native libraries: " + ", ".join(missing))
         check_flutter_payload(compiler, aar, package)
-    destination = output / "flashlink-arm64-debug.apk"
-    copy_apk(apk, destination)
+    destination = output / f"flashlink-arm64-{variant}.apk"
+    if signing_config:
+        sign_release(apk, signing_config, destination, official)
+    else:
+        copy_apk(apk, destination)
     return destination
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    signing = parser.add_mutually_exclusive_group()
+    signing.add_argument("--release", action="store_true",
+                         help="Build a release APK using FLASHLINK_ANDROID_SIGNING_CONFIG (path to a local JSON file).")
+    signing.add_argument("--sign-verification-apk", type=Path, metavar="TEMPLATE.apk",
+                         help="Sign a verification APK supplied by a developer portal with the official release key.")
     parser.add_argument("--prepare-only", action="store_true",
                         help="Apply and verify integration against the pinned host; skip compilation.")
     parser.add_argument("--upstream", default=ORIGIN,
@@ -180,13 +221,33 @@ def main():
     parser.add_argument("--output", type=Path,
                         help="Use a separate build directory and leave the APK in install/ unchanged.")
     args = parser.parse_args()
+    signing_config = None
+    if args.sign_verification_apk and (args.prepare_only or args.output):
+        parser.error("--sign-verification-apk writes a signed copy alongside the template; use it on its own.")
+    if args.sign_verification_apk or (args.release and not args.prepare_only):
+        config_path = os.environ.get("FLASHLINK_ANDROID_SIGNING_CONFIG")
+        if not config_path or not Path(config_path).is_file():
+            raise ValueError("Set FLASHLINK_ANDROID_SIGNING_CONFIG to your local release signing JSON file.")
+        signing_config = Path(config_path).resolve()
+    if args.sign_verification_apk:
+        template = args.sign_verification_apk.resolve(strict=True)
+        if template.suffix.lower() != ".apk" or not zipfile.is_zipfile(template):
+            raise ValueError("Select the APK template downloaded from the developer portal.")
+        with zipfile.ZipFile(template) as archive:
+            if "AndroidManifest.xml" not in archive.namelist():
+                raise ValueError("Verification APK is missing AndroidManifest.xml.")
+        signed = template.with_name(template.stem + "-signed.apk")
+        sign_release(template, signing_config, signed, official=True)
+        print(f"Signed verification APK: {signed}")
+        return
     output = (args.output or ROOT / "build/android").resolve()
     host = prepare(output, args.upstream)
     if args.prepare_only:
         print(f"Patched Moonlight {PIN} in {host}")
     else:
-        apk = build(output, host)
-        if args.output is None:
+        official = args.release and args.output is None
+        apk = build(output, host, signing_config, official)
+        if official:
             copy_apk(apk, ROOT / "install/FlashLink-Android-arm64.apk")
 
 
