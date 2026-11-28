@@ -34,19 +34,15 @@ import java.security.cert.X509Certificate;
 
 public final class FlashLinkSessionActivity extends Activity {
     private TextView status, pinText;
-    private Button closeButton, retryButton;
+    private Button closeButton;
     private GLSurfaceView rendererProbe;
     private final Handler handler = new Handler();
     private boolean resumed;
     private static final int PLAY_DESKTOP = 71;
-    private static final String RESTORE_ATTEMPTS = "dev.flashlink.restoreAttempts";
-    private static final String RESTORE_NEXT = "dev.flashlink.restoreNext";
     private final FlashLinkReconnect recovery = new FlashLinkReconnect();
     private final Runnable recoveryTimeout = this::expireRecovery;
-    private final Runnable openReady = this::openIfResumed;
     private boolean gameOpen;
     private Intent ready;
-    private Intent retryQuality;
     private volatile boolean stopped;
     private volatile NvHTTP current;
     private volatile FlashLinkConsent consent;
@@ -69,22 +65,9 @@ public final class FlashLinkSessionActivity extends Activity {
         closeButton.setText("取消连接");
         closeButton.setOnClickListener(v -> finish());
         panel.addView(closeButton);
-        retryButton = new Button(this);
-        retryButton.setText("重试原画质");
-        retryButton.setVisibility(View.GONE);
-        retryButton.setOnClickListener(v -> restoreQuality(retryQuality, true));
-        panel.addView(retryButton);
         setContentView(panel);
         gameOpen = state != null && state.getBoolean("player");
         if (gameOpen) return; // Android will deliver the result of the existing child.
-        if (state != null && state.containsKey("qualityReady")) {
-            queueQuality(state.getParcelable("qualityReady"));
-            return;
-        }
-        if (state != null && state.containsKey("qualityRetry")) {
-            showQualityRetry(state.getParcelable("qualityRetry"), state.getString("qualityError"));
-            return;
-        }
         if (state != null && state.getBoolean("recovering")) {
             fail("连接已中断，点返回后可重新连接。");
             return;
@@ -285,20 +268,6 @@ public final class FlashLinkSessionActivity extends Activity {
             expireRecovery();
             return;
         }
-        if (ready.getBooleanExtra(FlashLinkGame.RESTORING, false)) {
-            if (now >= ready.getLongExtra(FlashLinkGame.RESTORE_UNTIL, 0)) {
-                String lastError = ready.getStringExtra(FlashLinkGame.RESTORE_FAILURE);
-                showQualityRetry(ready, "自动恢复原画质已超时。" + (lastError == null ? "" : "\n" + lastError)
-                        + "\n请确认电脑和网络状态后重试。");
-                return;
-            }
-            long wait = ready.getLongExtra(RESTORE_NEXT, 0) - now;
-            if (wait > 0) {
-                handler.removeCallbacks(openReady);
-                handler.postDelayed(openReady, wait);
-                return;
-            }
-        }
         handler.removeCallbacks(recoveryTimeout);
         gameOpen = true;
         startActivityForResult(ready, PLAY_DESKTOP);
@@ -309,25 +278,7 @@ public final class FlashLinkSessionActivity extends Activity {
         super.onActivityResult(request, result, data);
         if (request != PLAY_DESKTOP) return;
         gameOpen = false;
-        if ((result == FlashLinkGame.QUALITY_CHANGE || result == FlashLinkGame.QUALITY_FAILED) && data != null) {
-            recovery.deadline = 0;
-            recovery.attempts = 0;
-            handler.removeCallbacks(recoveryTimeout);
-            if (result == FlashLinkGame.QUALITY_CHANGE) {
-                queueQuality(data);
-            } else if (data.getBooleanExtra(FlashLinkGame.RESTORING, false)) {
-                if (data.getBooleanExtra(FlashLinkGame.RETRYABLE, false)) {
-                    restoreQuality(data, false);
-                } else {
-                    showQualityRetry(data, "恢复原画质失败：" + data.getStringExtra(FlashLinkGame.RESTORE_FAILURE)
-                            + "\n请确认电脑和网络状态后重试。");
-                }
-            } else {
-                data.putExtra(FlashLinkQuality.EXTRA, data.getIntArrayExtra(FlashLinkGame.PREVIOUS_QUALITY));
-                data.putExtra(FlashLinkGame.RESTORING, true);
-                restoreQuality(data, true);
-            }
-        } else if (result == FlashLinkGame.EXPIRED) {
+        if (result == FlashLinkGame.EXPIRED) {
             expireRecovery();
         } else if (result == FlashLinkGame.NETWORK_LOST && data != null) {
             long deadline = data.getLongExtra(FlashLinkGame.DEADLINE, 0);
@@ -336,49 +287,6 @@ public final class FlashLinkSessionActivity extends Activity {
         } else {
             finish();
         }
-    }
-
-    private void restoreQuality(Intent game, boolean first) {
-        long now = SystemClock.elapsedRealtime();
-        FlashLinkReconnect retry = new FlashLinkReconnect();
-        // Allow Sunshine's pending RTSP launch to expire, then leave time to negotiate and decode.
-        long deadline = first ? now + 30_000 : game.getLongExtra(FlashLinkGame.RESTORE_UNTIL, now);
-        retry.interrupted(now, deadline);
-        retry.attempts = first ? 0 : game.getIntExtra(RESTORE_ATTEMPTS, 0);
-        long delay = first ? 0 : retry.nextDelay(now);
-        game.putExtra(FlashLinkGame.RESTORE_UNTIL, retry.deadline);
-        game.putExtra(RESTORE_ATTEMPTS, first ? 0 : retry.attempts + 1);
-        game.putExtra(RESTORE_NEXT, delay < 0 ? retry.deadline : now + delay);
-        queueQuality(game);
-    }
-
-    private void queueQuality(Intent game) {
-        FlashLinkQuality selected = FlashLinkQuality.fromArray(game.getIntArrayExtra(FlashLinkQuality.EXTRA));
-        if (selected == null) {
-            fail("无法读取串流参数，请重新连接。");
-            return;
-        }
-        // This private child result carries the same pinned host, client identity and Desktop app ID.
-        game.setClass(this, FlashLinkGame.class);
-        ready = game;
-        retryQuality = null;
-        retryButton.setVisibility(View.GONE);
-        boolean restoring = game.getBooleanExtra(FlashLinkGame.RESTORING, false);
-        String restoreStatus = game.getIntExtra(RESTORE_ATTEMPTS, 0) > 0 ? "正在重试恢复上次画质…" : "正在恢复上次画质…";
-        status.setText(restoring ? "画质切换失败：" + game.getStringExtra(FlashLinkGame.FAILURE)
-                + "\n" + restoreStatus : "正在为同一台电脑重新协商画质…");
-        pinText.setText(selected.displayText());
-        closeButton.setText("取消连接");
-        openIfResumed();
-    }
-
-    private void showQualityRetry(Intent game, String message) {
-        ready = null;
-        retryQuality = game;
-        pinText.setText("");
-        status.setText(message);
-        retryButton.setVisibility(View.VISIBLE);
-        closeButton.setText("返回设备列表");
     }
 
     private void scheduleRecovery() {
@@ -412,17 +320,11 @@ public final class FlashLinkSessionActivity extends Activity {
     @Override protected void onSaveInstanceState(Bundle state) {
         state.putBoolean("player", gameOpen);
         state.putBoolean("recovering", recovery.deadline > 0);
-        if (ready != null && ready.hasExtra(FlashLinkQuality.EXTRA)) state.putParcelable("qualityReady", ready);
-        if (retryQuality != null) {
-            state.putParcelable("qualityRetry", retryQuality);
-            state.putString("qualityError", status.getText().toString());
-        }
         super.onSaveInstanceState(state);
     }
 
     @Override protected void onStop() {
-        if (!gameOpen && !isFinishing() && (recovery.deadline > 0 ||
-                (ready != null && ready.hasExtra(FlashLinkQuality.EXTRA)))) finish();
+        if (!gameOpen && !isFinishing() && recovery.deadline > 0) finish();
         super.onStop();
     }
 

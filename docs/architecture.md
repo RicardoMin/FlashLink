@@ -51,19 +51,19 @@ Windows 主进程提供系统托盘、逐设备撤销和报告导出。EXE 和�
 
 ## 会话内调整串流画质
 
-首帧显示后，Android 在当前 Sunshine 会话的加密可靠 ENet 控制通道查询码率调节能力。`0x6A40` 请求携带两个小端 32 位整数，分别为非零请求编号与目标总码率（Kbps，零表示查询）。主机仅在当前使用支持动态码率的 H.264 NVENC 编码器时报告支持。调整时主机沿用建流时的纠错、音频和协议开销计算，在两帧之间调用 `NvEncReconfigureEncoder`，再通过 `0x6A41` 返回请求编号、结果和已确认的总码率。视频、音频、输入和防窥心跳继续使用原会话。
+首帧显示后，Android 在当前 Sunshine 会话的加密可靠 ENet 控制通道查询码率调节能力。`0x6A40` 请求携带两个小端 32 位整数，分别为非零请求编号与目标总码率（Kbps，零表示查询）。主机按本次实际协商的编码格式查询 NVENC 动态码率能力，包括 H.264、HEVC 和 AV1。调整时主机沿用建流时的纠错、音频和协议开销计算，在两帧之间调用 `NvEncReconfigureEncoder`，再通过 `0x6A41` 返回请求编号、结果和已确认的总码率。视频、音频、输入和防窥心跳继续使用原会话。
 
 帧率使用独立的请求与回执（`0x6A42`、`0x6A43`），查询格式相同，目标值用整数 FPS 表示。主机调整当前会话的编码节奏和 NVENC 的帧率参数，Windows 共享采集按活动会话所需的最快节奏运行。各会话独立限帧，桌面显示模式保持原样。Android 按主机确认的帧率更新播放器的呈现节奏。
 
-分辨率请求与回执使用 `0x6A44` 和 `0x6A45`。尺寸字段的高 16 位是宽度，低 16 位是高度，零表示查询。主机为当前会话准备目标尺寸的缩放器和编码器，在新尺寸的关键帧就绪后切换，并更新指针坐标映射。原桌面显示模式、其他客户端及音频通道继续沿用原配置。Android 使用支持自适应播放的 H.264 解码器，按解码输出更新画面布局，主机回执与新尺寸的画面均到达后才保存设置。
+分辨率请求与回执使用 `0x6A44` 和 `0x6A45`。尺寸字段的高 16 位是宽度，低 16 位是高度，零表示查询。主机为当前会话准备目标尺寸的缩放器和编码器，在新尺寸的关键帧就绪后切换，并更新指针坐标映射。Android 检查所选解码器的自适应播放能力、已分配的尺寸上限以及目标尺寸与帧率的组合。播放器按解码输出更新画面布局，主机回执与新尺寸的画面均到达后才保存设置。
 
-Android 分别探测各项能力，按请求编号匹配回执。设置请求超时后会查询实际值。组合调整及当前会话不支持的操作沿用重连和画质回滚流程。[Sunshine 补丁](../integrations/sunshine/live-settings.patch) · [Moonlight 控制通道](../apps/android/moonlight-common-live-settings.patch) · [Android 请求处理](../apps/android/src/main/java/com/limelight/FlashLinkLiveSetting.java)
+Android 分别探测各项能力，按请求编号匹配回执。设置请求超时后会查询实际值。一次应用多项设置时，降帧先于调整尺寸，升帧在尺寸切换后执行，最后调整码率。每步完成后才发下一条请求。操作失败时播放器报告原因和已确认的设置，用户继续使用同一会话。[Sunshine 补丁](../integrations/sunshine/live-settings.patch) · [Moonlight 控制通道](../apps/android/moonlight-common-live-settings.patch) · [Android 请求处理](../apps/android/src/main/java/com/limelight/FlashLinkLiveSetting.java)
 
 ## 串流声音与 Windows 主音量
 
 两个安卓入口读写同一组播放位置和断开偏好。播放器启动前会用已配对证书探测主机能力。支持声音控制时，Moonlight 请求 Sunshine 保留默认播放设备，Windows 继续采集该设备的 WASAPI 回环音频。安卓单独调整串流 `AudioTrack` 的增益，所以「仅电脑播放」也能读到用户真实的媒体音量。老主机沿用 Moonlight 的播放协商。[安卓设置](../apps/android/src/main/java/com/limelight/FlashLinkAudio.java) · [播放器](../apps/android/src/main/java/com/limelight/FlashLinkGame.java)
 
-两端都支持开流前静音时，选择「仅手机或平板播放」会先向 Windows 发送准备请求。Windows 成功静音默认输出后才应答，安卓收到确认才启动媒体。若启动取消或准备心跳过期，主机会撤销这次临时静音。串流建立后，安卓通过双向 TLS 心跳更新播放位置、断开策略、媒体音量百分比和静音状态。Windows 按客户端身份、会话编号和包序号接收更新。主动退出附带最终音量，画质切换使用单独的交接消息。[安卓会话通道](../apps/android/src/main/java/com/limelight/FlashLinkPrivacyLease.java) · [Windows 消息处理](../crates/host-windows/src/audio_wire.rs)
+两端都支持开流前静音时，选择「仅手机或平板播放」会先向 Windows 发送准备请求。Windows 成功静音默认输出后才应答，安卓收到确认才启动媒体。若启动取消或准备心跳过期，主机会撤销这次临时静音。串流建立后，安卓通过双向 TLS 心跳更新播放位置、断开策略、媒体音量百分比和静音状态。Windows 按客户端身份、会话编号和包序号接收更新。主动退出附带最终音量。在同一会话内调整画质期间，现有声音心跳持续运行。[安卓会话通道](../apps/android/src/main/java/com/limelight/FlashLinkPrivacyLease.java) · [Windows 消息处理](../crates/host-windows/src/audio_wire.rs)
 
 声音控制心跳超出重连宽限期时，Windows 检查当前 Sunshine 进程是否仍持有媒体音频端口。媒体仍在线时保留串流路由，会话结束后用最后收到的样本执行断开策略。「跟随」写入音量和静音状态，「保持电脑静音」只设静音，保留 Windows 滑块位置。如果默认设备暂时不可用，运行中的主机会在设备恢复后重试。串流切回本机播放时，主机只撤销 FlashLink 施加的临时静音。[声音策略](../crates/host-windows/src/audio.rs) · [媒体端口检查](../crates/host-windows/src/media_transport.cpp) · [Windows Core Audio](../crates/host-windows/src/audio_endpoint.cpp)
 

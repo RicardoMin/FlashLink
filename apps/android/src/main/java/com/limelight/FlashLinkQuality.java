@@ -28,11 +28,13 @@ final class FlashLinkQuality {
 
     int[] toArray() { return new int[] {width, height, fps, bitrateKbps}; }
 
-    boolean canApplyLive(FlashLinkQuality target, boolean bitrateSupported, boolean fpsSupported, boolean sizeSupported) {
-        if (target.width != width || target.height != height)
-            return sizeSupported && target.fps == fps && target.bitrateKbps == bitrateKbps;
-        if (target.fps == fps) return bitrateSupported || target.bitrateKbps == bitrateKbps;
-        return fpsSupported && target.bitrateKbps == bitrateKbps;
+    // Lower the rate before enlarging the picture. Raise it only after the new size is on screen.
+    FlashLinkLiveSetting.Kind nextChange(FlashLinkQuality target) {
+        if (target.fps < fps) return FlashLinkLiveSetting.Kind.FRAME_RATE;
+        if (target.width != width || target.height != height) return FlashLinkLiveSetting.Kind.RESOLUTION;
+        if (target.fps != fps) return FlashLinkLiveSetting.Kind.FRAME_RATE;
+        if (target.bitrateKbps != bitrateKbps) return FlashLinkLiveSetting.Kind.BITRATE;
+        return null;
     }
 
     String displayText() {
